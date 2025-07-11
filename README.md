@@ -1,2 +1,4 @@
-# brcagenie
-Breast Cancer Genie (BRCAGenie): AI-based Polygenic Risk Score Calculator for Accurate Prediction of Breast Cancer Survival
+# Breast Cancer Genie (BRCAGenie)
+BRCAGenie, an AI-based polygenic risk scoring tool, predicts breast cancer overall survival based on genetic and clinical factors.
+
+Breast cancer is the one of the most common cancers globally, bearing a significant disease burden. As the disease is characterised by highly variable survival outcomes, there is a need for accurate survival prediction models to guide personalised clinical decision-making. Existing breast cancer polygenic risk score models based on gene expression have largely focused on predefined subsets of genes, such as biologically-relevant, differentially-expressed or protein-coding genes, potentially overlooking critical but uncharacterised biomarkers. In contrast, through an unbiased, hypothesis-free approach, we have developed Breast Cancer Genie (BRCAGenie), a novel 43-gene + clinical polygenic risk score model that can accurately predict breast cancer survival with three-year and five-year AUC(t) scores of 0.812 and 0.814.

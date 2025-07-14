@@ -1,0 +1,3837 @@
+### BRCAGenie: A Machine Learning-Driven 43-Gene Polygenic Risk Score Model for Precision Prediction of Breast Cancer Survival ###
+### Last Updated: 14-07-25
+---
+output:
+  word_document: default
+  html_document: default
+---
+
+## Install packages
+```{r}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install('TCGAbiolinks')
+BiocManager::install("maftools")
+install.packages("pheatmap")
+BiocManager::install("SummarizedExperiment")
+BiocManager::install('org.Hs.eg.db')
+install.packages("randomForest")
+install.packages("mlbench")
+install.packages("kernlab")
+install.packages("survAUC")
+install.packages("glmnet")
+install.packages("survivalAnalysis")
+BiocManager::install("sva")
+BiocManager::install("survcomp")
+```
+
+## Read packages
+```{r}
+library(tidyverse)
+library(maftools)
+library(pheatmap)
+library(tidyr)
+library(readr)
+library(TCGAbiolinks)
+library(dplyr)
+library(survival)
+library(survminer)
+library(data.table)
+library(biomaRt)
+library(table1)
+library(caret)
+library(org.Hs.eg.db)
+library(survcomp)
+library(sva)
+library(timeROC)
+library(rms)
+```
+
+<!-- ### DOWNLOAD DATA USING GDC QUERY ### -->
+<!-- ## Obtain TCGA info -->
+<!-- ```{r} -->
+<!-- gdcprojects <- getGDCprojects() -->
+<!-- getProjectSummary('TCGA-BRCA') -->
+<!-- ``` -->
+
+<!-- ## Download TCGA clinical data ## -->
+
+<!-- ##### -->
+<!-- download clinical data using GDC Query -->
+<!-- ```{r} -->
+<!-- breast <- GDCquery_clinic("TCGA-BRCA") -->
+<!-- ``` -->
+<!-- ## 1098 subjects -->
+
+<!-- remove columns with all NAs -->
+<!-- ```{r} -->
+<!-- n_NAs <- apply(breast, 2, function(x){sum(is.na(x))}) -->
+<!-- breast = breast[ ,n_NAs < nrow(breast)] -->
+<!-- ``` -->
+
+<!-- filter by gender  -->
+<!-- ```{r} -->
+<!-- breast = breast[which(breast$gender=='female'),] -->
+<!-- ``` -->
+
+<!-- filter by days to last follow up  -->
+<!-- ```{r} -->
+<!-- breast = breast[which(breast$days_to_last_follow_up >= 30 | breast$days_to_death >= 30),] -->
+<!-- ``` -->
+
+<!-- save as csv -->
+<!-- ```{r} -->
+<!-- write.csv(breast,"breast.csv") -->
+<!-- ``` -->
+
+<!-- ## 1034 subjects after filtering -->
+<!-- ```{r} -->
+<!-- breast <- read.csv("breast.csv") -->
+<!-- ``` -->
+
+<!-- ## Download TCGA transcriptome data ## -->
+<!-- building a query to get transcriptome data -->
+<!-- filter to get list of barcodes -->
+<!-- ```{r} -->
+<!-- query_TCGA <- GDCquery(project = 'TCGA-BRCA', -->
+<!--                        data.category = 'Transcriptome Profiling', -->
+<!--                        experimental.strategy = 'RNA-Seq', -->
+<!--                        workflow.type = 'STAR - Counts', -->
+<!--                        access = 'open') -->
+<!-- output_query_TCGA <- getResults(query_TCGA) -->
+<!-- ``` -->
+<!-- # download data - GDCdownload -->
+<!-- ```{r} -->
+<!-- setwd("C:/Users/Jia Wei/Desktop") -->
+<!-- GDCdownload(query_TCGA) -->
+<!-- ``` -->
+<!-- # prepare data -->
+<!-- ```{r} -->
+<!-- library(SummarizedExperiment) -->
+<!-- setwd("C:/Users/Jia Wei/Desktop") -->
+<!-- tcga_brca_data <- GDCprepare(query_TCGA, summarizedExperiment = TRUE) -->
+<!-- brca_tpm_unstranded <- assay(tcga_brca_data, 'tpm_unstrand') -->
+<!-- ``` -->
+
+<!-- save the tpm data -->
+<!-- ```{r} -->
+<!-- write.csv(data.frame(brca_tpm_unstranded),"brca_tpm_unstranded.csv") -->
+<!-- ``` -->
+
+<!-- save tpm as dataframes -->
+<!-- ```{r} -->
+<!-- brca_tpm_unstranded = data.frame(brca_tpm_unstranded) -->
+<!-- ``` -->
+
+<!-- transpose -->
+<!-- ```{r} -->
+<!-- brca_tpm_unstranded_1 = data.frame(transpose(brca_tpm_unstranded)) -->
+<!-- ``` -->
+
+<!-- redefine row and column names -->
+<!-- ```{r} -->
+<!-- rownames(brca_tpm_unstranded_1) <- colnames(brca_tpm_unstranded) -->
+<!-- colnames(brca_tpm_unstranded_1) <- rownames(brca_tpm_unstranded) -->
+<!-- ``` -->
+
+<!-- create a new column for entity ID -->
+<!-- ```{r} -->
+<!-- brca_tpm_unstranded_1$EntityID = row.names(brca_tpm_unstranded_1) -->
+<!-- ``` -->
+
+<!-- create a new column for subject ID -->
+<!-- ```{r} -->
+<!-- brca_tpm_unstranded_1$SubjectID = substr(brca_tpm_unstranded_1$EntityID, 1, 12) ## extract first 12 characters -->
+<!-- ``` -->
+
+<!-- save as csv -->
+<!-- ```{r} -->
+<!-- write.csv(data.frame(brca_tpm_unstranded_1),"brca_tpm_unstranded_1.csv") -->
+<!-- ``` -->
+
+<!-- create another column for sample_barcode (sample types could be tumour, normal or control) -->
+<!-- ```{r} -->
+<!-- brca_tpm_unstranded_1$sample_barcode = substr(brca_tpm_unstranded_1$EntityID, 14, 15) ## extract sample barcode -->
+<!-- ``` -->
+
+<!-- filter to keep primary tumors only (01) -->
+<!-- ```{r} -->
+<!-- brca_tpm_unstranded_2 = brca_tpm_unstranded_1[which(brca_tpm_unstranded_1$sample_barcode=="01"),] -->
+<!-- ``` -->
+
+<!-- remove duplicates based on subject ID (because 1 subject may have > 1 observations which are tumour types) -->
+<!-- ```{r} -->
+<!-- brca_tpm_unstranded_2 = brca_tpm_unstranded_2[!duplicated(brca_tpm_unstranded_2$SubjectID), ] -->
+<!-- ``` -->
+
+<!-- remove near zero variance variables -->
+<!-- ```{r} -->
+<!-- nzv <- nearZeroVar(brca_tpm_unstranded_2, saveMetrics= TRUE) -->
+<!-- nzv_index <- nearZeroVar(brca_tpm_unstranded_2) -->
+<!-- table(nzv$nzv) -->
+<!-- brca_tpm_unstranded_2 <- brca_tpm_unstranded_2[,-nzv_index] -->
+<!-- ``` -->
+
+<!-- save as csv -->
+<!-- ```{r} -->
+<!-- write.csv(brca_tpm_unstranded_2,"brca_tpm_unstranded_2.csv") -->
+<!-- ``` -->
+
+<!-- filter low count matrix -->
+<!-- removing genes from the count matrix that have a TPM <1 in 70% or more of the samples -->
+<!-- ```{r} -->
+<!-- threshold <- 1 # set the threshold TPM count -->
+<!-- percent_cutoff <- 0.7 # set the percentage of samples with TPM below threshold -->
+<!-- low_count_genes <- colSums(brca_tpm_unstranded_2[,1:43581] < threshold) / nrow(brca_tpm_unstranded_2[,1:43581]) >= percent_cutoff -->
+<!-- low_count_genes <- as.data.frame(low_count_genes) ## dataframe with each gene indicating true/false -->
+<!-- colum_names_to_remove <- rownames(low_count_genes)[which(low_count_genes == "TRUE" , arr.ind = TRUE)[, 1]] -->
+<!-- brca_tpm_unstranded_3 <- brca_tpm_unstranded_2[,!(colnames(brca_tpm_unstranded_2) %in% colum_names_to_remove)] -->
+<!-- ``` -->
+
+<!-- save as csv -->
+<!-- ```{r} -->
+<!-- write.csv(data.frame(brca_tpm_unstranded_3),"brca_tpm_unstranded_3.csv") -->
+<!-- ``` -->
+
+<!-- ## MERGE CLINICAL and GENETIC data ### -->
+
+<!-- clean transcriptome data to have the same patient barcode -->
+<!-- ```{r} -->
+<!-- brca_tpm_unstranded_3$bcr_patient_barcode = gsub("\\.","-",brca_tpm_unstranded_3$SubjectID) -->
+<!-- brca_merge = merge(x = breast, y = brca_tpm_unstranded_3, by = "bcr_patient_barcode") -->
+<!-- ``` -->
+
+<!-- ### Survival Analysis ### -->
+
+<!-- create "censored_status_opp" variable -->
+<!-- 0: alive -->
+<!-- 1: dead -->
+<!-- ```{r} -->
+<!-- brca_merge$censored_status_opp <- ifelse(brca_merge$vital_status == "Dead", 1, 0) -->
+<!-- ``` -->
+
+<!-- calculate "survival_time" variable that is equal to days_to_death for dead patients and days_to_last_follow_up for patients who are still alive -->
+<!-- ```{r} -->
+<!-- brca_merge$survival_time <- ifelse(brca_merge$censored_status_opp == 1, -->
+<!--                                          brca_merge$days_to_death, -->
+<!--                                          brca_merge$days_to_last_follow_up) -->
+<!-- brca_merge$survival_time = as.numeric(brca_merge$survival_time) -->
+<!-- ``` -->
+
+<!-- plot survival time in years -->
+<!-- ```{r} -->
+<!-- brca_merge$survival_time_years = brca_merge$survival_time/365 -->
+<!-- hist(brca_merge$survival_time_years,main="Histogram of Survival Time in Years",xlab="Survival Time (in years)",labels=TRUE,ylim=c(0,500),xlim=c(0,25)) -->
+<!-- ``` -->
+
+<!-- five year survival -->
+<!-- ```{r} -->
+<!-- brca_merge$five_year_survival <- ifelse(brca_merge$survival_time_years>5, 1, 0) -->
+<!-- # Group by count using dplyr -->
+<!-- agg_tbl_5 <- brca_merge %>% group_by(five_year_survival) %>%  -->
+<!--   summarise(total_count=n(), -->
+<!--             .groups = 'drop') -->
+<!-- agg_tbl_5 -->
+<!-- ``` -->
+
+<!-- three year survival -->
+<!-- ```{r} -->
+<!-- library(dplyr) -->
+<!-- brca_merge$three_year_survival <- ifelse(brca_merge$survival_time_years>3, 1, 0) -->
+<!-- # Group by count using dplyr -->
+<!-- agg_tbl_3 <- brca_merge %>% group_by(three_year_survival) %>%  -->
+<!--   summarise(total_count=n(), -->
+<!--             .groups = 'drop') -->
+<!-- agg_tbl_3 -->
+<!-- ``` -->
+
+####################################################################
+
+TCGA clinical and expression data: brca_merge.csv
+METABRIC expression data: metabric_expression.Rdata
+METABRIC clinical data: metabric_clinical.Rdata
+
+TCGA data
+```{r}
+brca_merge = read.csv("others/brca_merge.csv")
+brca_merge <- brca_merge[ , -1]
+```
+
+save brca_merge dataframe
+```{r}
+write.csv(brca_merge,"brca_merge.csv")
+```
+
+# Generate table of clinical demographic characteristics
+```{r}
+library(table1)
+clinical_table <- table1(~race + age_at_index + ajcc_pathologic_stage + ajcc_pathologic_t + ajcc_pathologic_n + ajcc_pathologic_m + as.factor(five_year_survival) + as.factor(three_year_survival), data=brca_merge)
+
+print(clinical_table)
+write.csv(clinical_table, file = "clinical_table.csv")
+```
+
+# Generate table of clinical demographic characteristics
+```{r}
+library(table1)
+brca_merge$age_at_diagnosis_years = brca_merge$age_at_diagnosis/365
+clinical_table_NEW <- table1(~age_at_diagnosis_years + as.factor(five_year_survival) + as.factor(three_year_survival), data=brca_merge)
+
+print(clinical_table_NEW)
+write.csv(clinical_table_NEW, file = "clinical_table_NEW.csv")
+```
+
+## METABRIC data
+## Downloaded from cBioPortal
+METABRIC gene expression file
+```{r}
+load('METABRIC_data/metabric_expression.Rdata')
+```
+
+convert to dataframe and clean up
+```{r}
+metabric_exp = data.frame(expr)
+```
+
+transpose
+```{r}
+metabric_exp_1 = data.frame(t(metabric_exp))
+```
+
+add in column for PATIENT_ID
+```{r}
+metabric_exp_1$PATIENT_ID = row.names(metabric_exp_1)
+```
+
+read in metabric clinical file
+```{r}
+load('METABRIC_data/metabric_clinical.Rdata')
+```
+
+convert to dataframe and clean up
+```{r}
+metabric_cli = data.frame(clin)
+```
+
+find and replace
+```{r}
+library('stringr')
+metabric_cli$PATIENT_ID <- str_replace(metabric_cli$PATIENT_ID,'-','.')
+```
+
+merge
+```{r}
+metabric_merge = merge(metabric_cli,metabric_exp_1,by="PATIENT_ID")
+```
+
+create censored status
+```{r}
+metabric_merge$censored_status <- ifelse(metabric_merge$OS_STATUS == "DECEASED", 0, 1)
+```
+
+create censored status opp
+```{r}
+metabric_merge$censored_status_opp <- ifelse(metabric_merge$OS_STATUS == "DECEASED", 1, 0)
+```
+
+calculate "survival_time" variable
+```{r}
+metabric_merge$survival_time <- metabric_merge$OS_MONTHS*30.417
+metabric_merge$survival_time_years = metabric_merge$survival_time/365
+```
+
+age distribution for METABRIC data
+```{r}
+hist(metabric_merge$AGE_AT_DIAGNOSIS,main="Age Distribution for METABRIC",xlab="Age at Diagnosis")
+```
+
+create variable for five year survival
+```{r}
+metabric_merge$five_year_survival <- ifelse(metabric_merge$survival_time_years>5, 1, 0)
+# Group by count using dplyr
+agg_tbl_5 <- metabric_merge %>% group_by(five_year_survival) %>% 
+  summarise(total_count=n(),
+            .groups = 'drop')
+agg_tbl_5
+```
+
+create variable for three year survival
+```{r}
+metabric_merge$three_year_survival <- ifelse(metabric_merge$survival_time_years>3, 1, 0)
+# Group by count using dplyr
+agg_tbl_3 <- metabric_merge %>% group_by(three_year_survival) %>% 
+  summarise(total_count=n(),
+            .groups = 'drop')
+agg_tbl_3
+```
+
+save metabric merge
+```{r}
+write.csv(metabric_merge,"metabric_merge.csv")
+```
+
+generate table of clinical demographic characteristics
+```{r}
+library(table1)
+clinical_table_metabric <- table1(~AGE_AT_DIAGNOSIS + as.factor(five_year_survival) + as.factor(three_year_survival), data=metabric_merge)
+
+print(clinical_table_metabric)
+write.csv(clinical_table_metabric, file = "clinical_table_metabric.csv")
+```
+
+create dataframe of METABRIC gene features
+```{r}
+metabric_gene_features = data.frame(cbind(21:24380,colnames(metabric_merge)[21:24380]))
+colnames(metabric_gene_features) = c("colnumber","genesymbol")
+```
+
+filter to keep only those valid gene symbols
+```{r}
+# Function to filter valid gene symbols
+filter_valid_gene_symbols <- function(gene_symbols) {
+  # Retrieve all valid gene symbols from the org.Hs.eg.db package
+  valid_symbols <- keys(org.Hs.eg.db, keytype = "SYMBOL")
+  
+  # Filter the input gene symbols to retain only valid ones
+  valid_gene_symbols <- gene_symbols[gene_symbols %in% valid_symbols]
+  
+  return(valid_gene_symbols)
+}
+
+# Filter the gene symbols
+metabric_valid_gene_symbols <- data.frame(filter_valid_gene_symbols(metabric_gene_features$genesymbol))
+colnames(metabric_valid_gene_symbols) = c("genesymbol")
+```
+
+get ensembleID from genesymbol
+```{r}
+library(org.Hs.eg.db)
+keytypes(org.Hs.eg.db)
+columns(org.Hs.eg.db)
+
+metabric_valid_gene_symbols$ensembl = mapIds(org.Hs.eg.db,
+       keys = metabric_valid_gene_symbols$genesymbol,
+       keytype = 'SYMBOL',
+       column = 'ENSEMBL',
+       multiVals = "first")
+```
+
+create a dataframe of TCGA gene features
+```{r}
+tcga_gene_features = data.frame(cbind(47:18983,colnames(brca_merge)[47:18983]))
+colnames(tcga_gene_features) = c("colnumber","ensembleID")
+```
+
+create ensembleID2 column which is the ensembleID column without the version number
+```{r}
+tcga_gene_features$ensembleID2 = substr(tcga_gene_features$ensembleID, 1, 15) ## extract first 15 characters
+```
+
+overlap between TCGA and METABRIC (match by Ensembl ID)
+```{r}
+overlapping_genes = data.frame(intersect(tcga_gene_features$ensembleID2,metabric_valid_gene_symbols$ensembl))
+colnames(overlapping_genes) = c("overlapping_genes")
+```
+
+save the overlapping_genes
+```{r}
+write.csv(overlapping_genes,"overlapping_genes.csv")
+```
+
+filter rows of tcga_gene_features for overlapping genes
+```{r}
+selected_rows <- tcga_gene_features[tcga_gene_features$ensembleID2 %in% overlapping_genes$overlapping_genes, ]
+```
+
+order selected rows such that they follow the order of "overlapping_genes"
+```{r}
+selected_rows <- selected_rows[order(match(selected_rows$ensembleID2, overlapping_genes$overlapping_genes)), ]
+```
+
+from brca_merge, filter to only keep outcomes and genes that overlap with metabric, to form brca_merge_2
+```{r}
+brca_merge_2 <- brca_merge[, c(18986,18988, match(selected_rows$ensembleID, names(brca_merge)))]
+```
+
+save the brca_merge_2
+```{r}
+write.csv(brca_merge_2,"brca_merge_2.csv")
+```
+
+## clean METABRIC dataset
+filter rows of metabric_valid_gene_symbols for overlapping genes
+```{r}
+selected_rows_metabric <- metabric_valid_gene_symbols[metabric_valid_gene_symbols$ensembl %in% overlapping_genes$overlapping_genes, ]
+```
+
+order selected_rows_metabric such that they follow the order of "overlapping_genes"
+```{r}
+selected_rows_metabric <- selected_rows_metabric[order(match(selected_rows_metabric$ensembl, overlapping_genes$overlapping_genes)), ]
+```
+
+clean up to leave only outcomes and genes for metabric
+```{r}
+library(dplyr)
+metabric_merge_cleaned = dplyr::select(metabric_merge, c(24382,24384,selected_rows_metabric$genesymbol)) ## select censored_status_opp, survival_time_years and overlapping gene columns
+```
+
+save metabric_merge_cleaned
+```{r}
+write.csv(metabric_merge_cleaned,"metabric_merge_cleaned.csv")
+```
+
+## Correct for BATCH EFFECTS using SVA
+use combat function, parametric method (default)
+```{r}
+library(sva)
+```
+
+## ensure TCGA and METABRIC datasets are the same sequence of columns
+```{r}
+length(colnames(brca_merge_2))
+length(colnames(metabric_merge_cleaned))
+```
+
+# rename metabric such that the column names are same as tcga
+```{r}
+metabric_merge_cleaned_1 = metabric_merge_cleaned
+colnames(metabric_merge_cleaned_1) = colnames(brca_merge_2)
+```
+
+# Rows correspond to samples, and columns correspond to genes
+# Combine the tcga and metabric datasets
+```{r}
+combined_data <- rbind(brca_merge_2, metabric_merge_cleaned_1)
+```
+
+# Define batch variable (1 for TCGA, 2 for METABRIC)
+```{r}
+batch <- c(rep(1, nrow(brca_merge_2)), rep(2, nrow(metabric_merge_cleaned_1)))
+```
+
+transpose data to rows as genes and columns as samples first before doing combat
+```{r}
+combat_data_matrix = t(as.matrix(combined_data[,3:11457]))
+```
+
+# use ComBat function to adjust for batch effects
+```{r}
+combat_data <- ComBat(dat = combat_data_matrix, batch = batch, mod = NULL, par.prior=TRUE, prior.plots=FALSE)
+```
+
+# Save the raw adjusted data 
+```{r}
+write.csv(combat_data, file = "combat_data.csv", row.names = TRUE)
+```
+
+# Split the raw adjusted data back into TCGA and METABRIC datasets
+```{r}
+combat_data_t = t(combat_data)
+adjusted_tcga_data <- cbind(brca_merge_2[,1:2],combat_data_t[1:nrow(brca_merge_2), ],brca_merge[,2:46])
+adjusted_metabric_data <- cbind(metabric_merge_cleaned_1[,1:2],combat_data_t[(nrow(brca_merge_2) + 1):nrow(combined_data), ])
+```
+
+# Ensure the column names (genes) are retained
+```{r}
+colnames(adjusted_tcga_data) <- c(colnames(brca_merge_2),colnames(brca_merge)[2:46])
+colnames(adjusted_metabric_data) <- colnames(metabric_merge_cleaned_1)
+```
+
+# save the cleaned adjusted data
+```{r}
+write.csv(adjusted_tcga_data, file = "adjusted_tcga_data.csv", row.names = TRUE)
+write.csv(adjusted_metabric_data, file = "adjusted_metabric_data.csv", row.names = TRUE)
+```
+
+add five year survival variable
+```{r}
+adjusted_tcga_data$five_year_survival <- ifelse(adjusted_tcga_data$survival_time_years>5, 1, 0)
+```
+
+split into tcga into training, validation and test sets
+stratified split based on five-year survival
+```{r}
+library(caret)
+set.seed(1)
+
+#split 70% of dataset as training set and 30% as temp set
+trainIndex <- createDataPartition(adjusted_tcga_data$five_year_survival, p = .7, 
+                                  list = FALSE, 
+                                  times = 1)
+head(trainIndex)
+brca_train <- adjusted_tcga_data[ trainIndex,]
+brca_temp <- adjusted_tcga_data[-trainIndex,]
+
+#further split into validation and test
+validationIndex <- createDataPartition(brca_temp$five_year_survival, p = 1/3,
+                                  list = FALSE,
+                                  times = 1)
+brca_validation <- brca_temp[validationIndex, ]
+brca_test <- brca_temp[-validationIndex, ]
+
+# Check the sizes of the splits
+cat("Training set size: ", nrow(brca_train), "\n")
+cat("Validation set size: ", nrow(brca_validation), "\n")
+cat("Test set size: ", nrow(brca_test), "\n")
+```
+
+save as csv
+```{r}
+write.csv(brca_train,"brca_train.csv")
+write.csv(brca_validation,"brca_validation.csv")
+write.csv(brca_test,"brca_test.csv")
+```
+
+clean up to leave only outcomes and genes for brca_train, brca_validation and brca_test
+```{r}
+library(dplyr)
+brca_train_cleaned = dplyr::select(brca_train, c(1:11457)) ## select censored_status_opp, survival_time_years and gene columns
+brca_validation_cleaned = dplyr::select(brca_validation, c(1:11457)) ## select censored_status_opp, survival_time_years and gene columns
+brca_test_cleaned = dplyr::select(brca_test, c(1:11457)) ## select censored_status_opp, survival_time_years and gene columns
+```
+
+save
+```{r}
+write.csv(brca_train_cleaned,"brca_train_cleaned.csv")
+write.csv(brca_validation_cleaned,"brca_validation_cleaned.csv")
+write.csv(brca_test_cleaned,"brca_test_cleaned.csv")
+```
+
+## Z-score scaling ##
+scale training set
+```{r}
+brca_train_cleaned_scaled = cbind(brca_train_cleaned[,1:2],scale(brca_train_cleaned[,3:11457]))
+```
+
+saving scaling coefficients
+```{r}
+scaling_coefficients_center <- attr(scale(brca_train_cleaned[,3:11457]), "scaled:center")
+scaling_coefficients_scale <- attr(scale(brca_train_cleaned[,3:11457]), "scaled:scale")
+```
+
+```{r}
+write.csv(scaling_coefficients_center,"scaling_coefficients_center.csv")
+write.csv(scaling_coefficients_scale,"scaling_coefficients_scale.csv")
+```
+
+scale test set
+```{r}
+brca_test_cleaned_scaled = cbind(brca_test_cleaned[,1:2],scale(brca_test_cleaned[,3:11457],center = scaling_coefficients_center,scale=scaling_coefficients_scale))
+```
+
+scale validation set
+```{r}
+brca_validation_cleaned_scaled = cbind(brca_validation_cleaned[,1:2],scale(brca_validation_cleaned[,3:11457],center = scaling_coefficients_center,scale=scaling_coefficients_scale))
+```
+
+save brca_train_cleaned_scaled
+```{r}
+write.csv(brca_train_cleaned_scaled,"brca_train_cleaned_scaled.csv")
+write.csv(brca_validation_cleaned_scaled,"brca_validation_cleaned_scaled.csv")
+write.csv(brca_test_cleaned_scaled,"brca_test_cleaned_scaled.csv")
+```
+
+Z score scaling METABRIC (independently)
+```{r}
+metabric_cleaned_scaled = cbind(adjusted_metabric_data[,1:2],scale(adjusted_metabric_data[,3:11457]))
+```
+
+save metabric_cleaned_scaled
+```{r}
+write.csv(metabric_cleaned_scaled,"metabric_cleaned_scaled.csv")
+```
+
+### UNIVARIATE + LASSO COX ###
+start off with 11455 genes
+
+## STEP 1: Univariate cox regression ##
+3 to 11457 are the genes
+```{r}
+df_output_cox <-as.data.frame(matrix(nrow=11455,ncol=3)) ## initialise the output dataframe
+colnames(df_output_cox) = c("gene","hazardratio","pvalue") ## add column names for output dataframe
+df_output_cox$gene = colnames(brca_train_cleaned_scaled[,3:11457]) ## add the genes in the gene column of brca_train_cleaned_scaled
+counter = 1
+for (i in 3:11457){ ## columns 3 to 11457 are the genes in the brca_train_cleaned_scaled dataframe
+  ## determine optimal cutpoint
+  results = surv_cutpoint(brca_train_cleaned_scaled, time = "survival_time_years", event = "censored_status_opp", colnames(brca_train_cleaned_scaled)[i], minprop = 0.1, progressbar = TRUE)
+  cutpoint = results$cutpoint$cutpoint
+  # denote which cases have high (>= cutpoint) or low (< cutpoint) gene expression
+  brca_train_cleaned_scaled$strata <- ifelse(brca_train_cleaned_scaled[,i] >= cutpoint, 1,0) ## 1 is high, 0 is low
+  if (sum(brca_train_cleaned_scaled$strata)==722){
+    df_output_cox[counter,2] = NA ## NA means there is only 1 group, can't compare
+    df_output_cox[counter,3] = NA
+  }
+  else {
+    coxfit <- coxph(Surv(survival_time_years, censored_status_opp) ~ strata, data = brca_train_cleaned_scaled) ## cox
+    df_output_cox[counter,2] = summary(coxfit)$coefficients[, 2] ## hazard ratio
+    df_output_cox[counter,3] = summary(coxfit)$coefficients[, 5] ## extract p value
+  }
+  counter = counter + 1 ## the counter determines which row in the df_output_cox to fill
+  if (counter %% 100 == 0){
+    print(counter)
+  }
+}
+df_output_cox
+```
+
+save df_output_cox
+```{r}
+write.csv(df_output_cox, "df_output_cox.csv")
+```
+
+## an example of how the surv_cutpoint works
+```{r}
+## determine optimal cutpoint
+results = surv_cutpoint(brca_train_cleaned_scaled, time = "survival_time_years", event = "censored_status_opp", variables = c("ENSG00000001497.18"), minprop = 0.1, progressbar = TRUE)
+results$cutpoint$cutpoint
+```
+
+plot surv_cutpoint
+```{r}
+plot(results, "ENSG00000001497.18")
+```
+
+adjust based on fdr
+```{r}
+df_output_cox$adjustedpvalue = p.adjust(as.numeric(df_output_cox$pvalue), method = "fdr")
+```
+
+sort based on smallest to largest pvalue
+```{r}
+library(dplyr)
+df_output_cox_rank = arrange(df_output_cox, adjustedpvalue)
+```
+
+create another genename column which is the gene column without the version number
+```{r}
+df_output_cox_rank$genename = substr(df_output_cox_rank$gene, 1, 15) ## extract first 15 characters
+```
+
+get gene names from ensembl gene id
+```{r}
+library(org.Hs.eg.db)
+keytypes(org.Hs.eg.db)
+columns(org.Hs.eg.db)
+
+df_output_cox_rank$genesymbol = mapIds(org.Hs.eg.db,
+       keys = df_output_cox_rank$genename,
+       keytype = 'ENSEMBL',
+       column = 'SYMBOL')
+```
+
+add in cox rank
+```{r}
+df_output_cox_rank$coxrank <- row.names(df_output_cox_rank)
+```
+
+```{r}
+colnames(df_output_cox_rank) = c("gene","coxhazardratio","coxpvalue","coxadjustedpvalue","genename","genesymbol","coxrank")
+```
+
+save as csv
+```{r}
+write.csv(df_output_cox_rank, "df_output_cox_rank.csv")
+```
+
+filter by p < 0.1
+```{r}
+df_output_p_0.1 = df_output_cox_rank[which(df_output_cox_rank$coxadjustedpvalue < 0.1),]
+```
+## selected 4393 genes
+
+create another brca_train_cleaned_0.1 dataset that contains the genes which are adjusted p value < 0.1
+```{r}
+brca_train_cleaned_0.1_scaled = dplyr::select(brca_train_cleaned_scaled, c(1:2, df_output_p_0.1$gene)) ## select variables and the 4393 genes
+```
+
+save as csv
+```{r}
+write.csv(df_output_p_0.1,"df_output_p_0.1.csv")
+write.csv(brca_train_cleaned_0.1_scaled,"brca_train_cleaned_0.1_scaled.csv")
+```
+
+## LASSO COX on the 4393 genes ##
+
+prepare data (x and y matrices)
+```{r}
+x_matrix_s = as.matrix(brca_train_cleaned_0.1_scaled[3:4395])
+y_matrix_s = as.matrix(brca_train_cleaned_0.1_scaled[1:2])
+colnames(y_matrix_s) = c("status","time")
+```
+
+### ML analysis ###
+```{r}
+library(glmnet)
+```
+
+find the optimal lambda value via cross-validation, deviance
+```{r}
+set.seed(1)
+cvfit1 <- cv.glmnet(x_matrix_s, y_matrix_s, family = "cox", type.measure = "C")
+```
+
+plot cv curves
+```{r}
+# Plot CV curve and save
+plot(cvfit1)
+abline(v = log(cvfit1$lambda.min), col = "red", lty = 2)
+abline(v = log(cvfit1$lambda.1se), col = "blue", lty = 2)
+
+legend("topright", legend = c("lambda.min", "lambda.1se"),
+       col = c("red", "blue"), lty = 2, cex = 0.8)
+```
+
+extract optimal lambdas
+```{r}
+cvfit1$lambda.1se
+```
+
+obtain coefficients lambda.1se
+```{r}
+best_predictors_deviance_full = as.matrix(coef(cvfit1, s = cvfit1$lambda.1se))
+```
+save results
+```{r}
+write.csv(best_predictors_deviance_full,"best_predictors_deviance_full.csv")
+```
+
+```{r}
+best_predictors_deviance_full = data.frame(best_predictors_deviance_full)
+colnames(best_predictors_deviance_full) = c("coefficient")
+best_predictors_deviance_full$gene = row.names(best_predictors_deviance_full)
+```
+
+filter those best predictors
+```{r}
+best_predictors_deviance_full_selected = best_predictors_deviance_full[which(best_predictors_deviance_full$coefficient != 0),]
+```
+## 107 genes selected
+
+find out the gene names
+create another genename column which is the gene column without the version number
+```{r}
+best_predictors_deviance_full_selected$genename = substr(best_predictors_deviance_full_selected$gene, 1, 15) ## extract first 15 characters
+```
+
+get gene names from ensembl gene id
+```{r}
+library(org.Hs.eg.db)
+keytypes(org.Hs.eg.db)
+columns(org.Hs.eg.db)
+
+best_predictors_deviance_full_selected$genesymbol = mapIds(org.Hs.eg.db,
+       keys = best_predictors_deviance_full_selected$genename,
+       keytype = 'ENSEMBL',
+       column = 'SYMBOL')
+```
+
+save as csv
+```{r}
+write.csv(best_predictors_deviance_full_selected,"best_predictors_deviance_full_selected.csv")
+```
+
+do downstream analysis on the selected genes (107 genes)
+```{r}
+brca_train_107_genes_scaled = dplyr::select(brca_train_cleaned_scaled, c(1:2, best_predictors_deviance_full_selected$gene)) ## select outcomes and the 107 genes
+```
+
+Multivariate Cox regression
+```{r}
+library(survival)
+set.seed(1)
+multi_cox <- coxph(Surv(survival_time_years, censored_status_opp) ~ .,data = brca_train_107_genes_scaled)
+summary(multi_cox)
+```
+
+save the multivariate cox results
+```{r}
+library(broom)
+out = tidy(multi_cox)
+```
+filter to get ENSEMBLE IDS without version number
+```{r}
+out$genename = substr(out$term, 1, 15) ## extract first 15 characters
+```
+
+get gene names from ensembl gene id
+```{r}
+library(org.Hs.eg.db)
+keytypes(org.Hs.eg.db)
+columns(org.Hs.eg.db)
+
+out$genesymbol = mapIds(org.Hs.eg.db,
+       keys = out$genename,
+       keytype = 'ENSEMBL',
+       column = 'SYMBOL')
+```
+
+sort based on p value
+```{r}
+out2 <- out[order(out$p.value),]
+```
+
+## stepwise selection on validation set
+plot curve of auc(t) in validation set to select best out of 107 genes
+add genes one by one based on p value
+```{r}
+library(timeROC)
+library(survival)
+## set seed
+set.seed(1)
+## initialise the output dataframe
+stepwise_output <-as.data.frame(matrix(nrow=107,ncol=3))
+## add column names for output dataframe
+colnames(stepwise_output) = c("number of ranked genes","auct3train","auct5train")
+
+### start for loop ###
+for (f in 1:107){
+  h = f+2
+  out_stepwise = out2[1:f,]
+  brca_validation_stepwise_genes = dplyr::select(brca_validation_cleaned_scaled, c(1:2, out_stepwise$term))
+  # calculate polygenic risk score for the stepwise selected genes
+  brca_validation_stepwise_genes$polygenic = c()
+  for (j in 1:103){
+    polygenic_score = 0
+    for (i in 3:h){ ## columns 3 to f+2 are the f genes we are interested in
+      c = i-2
+      polygenic_score = polygenic_score + brca_validation_stepwise_genes[j,i]*out_stepwise$estimate[c]
+      }
+    brca_validation_stepwise_genes$polygenic[j] = polygenic_score
+    }
+  ## calculate the AUC(t) train at 3 years
+  auct_3_train_random = timeROC(T=brca_validation_stepwise_genes$survival_time_years,
+                                delta=brca_validation_stepwise_genes$censored_status_opp,marker=brca_validation_stepwise_genes$polygenic,
+                                cause=1,weighting = "cox", times=c(0,3), ROC = TRUE, iid = FALSE)
+  ## save AUC(t) 3 train value in dataframe
+  stepwise_output[f,1] = f
+  stepwise_output[f,2] = auct_3_train_random$AUC[2]
+  ## calculate the AUC(t) train at 5 years
+  auct_5_train_random = timeROC(T=brca_validation_stepwise_genes$survival_time_years,
+                                delta=brca_validation_stepwise_genes$censored_status_opp,marker=brca_validation_stepwise_genes$polygenic,
+                                cause=1,weighting = "cox", times=c(0,5), ROC = TRUE, iid = FALSE)
+  ## save AUC(t) 5 train value in dataframe
+  stepwise_output[f,3] = auct_5_train_random$AUC[2]
+}
+### end of for loop ###
+
+### save the stepwise_output
+write.csv(stepwise_output,"stepwise_output.csv")
+```
+
+plot for 5 year auct
+```{r}
+plot(stepwise_output$`number of ranked genes`,stepwise_output$auct5train,main="Plot of 5-year AUC(t) against ranked genes",ylab="AUC(t)",xlab="Number of genes",pch=16)
+abline(v=43,col="blue")
+```
+
+filter to get top 43 genes
+```{r}
+out3 = out2[1:43,]
+```
+
+select the 43 genes
+```{r}
+brca_train_43_genes_scaled = dplyr::select(brca_train_cleaned_scaled, c(1:2, out3$term))
+```
+
+```{r}
+write.csv(brca_train_43_genes_scaled, "brca_train_43_genes_scaled.csv")
+```
+
+save dataframe as R data file
+```{r}
+save(brca_train_43_genes_scaled, file = "brca_train_43_genes_scaled.Rdata")
+```
+
+minimum scaled gene expression level
+```{r}
+min(brca_train_43_genes_scaled[, 3:45], na.rm=T)
+```
+max scaled gene expression level
+```{r}
+max(brca_train_43_genes_scaled[, 3:45], na.rm=T)
+```
+
+save multivariate cox hazard output
+```{r}
+write.csv(out2,"out2.csv")
+write.csv(out,"out.csv")
+write.csv(out3, "out3.csv")
+```
+
+# calculate polygenic risk score for the 43 selected genes
+the 43 genes are columns 3 to 45
+sum up gene expression x MULTIVARIATE cox coefficient to get the PRS for each person
+```{r}
+brca_train_43_genes_scaled$polygenic = c()
+for (j in 1:722){
+  polygenic_score = 0
+  for (i in 3:45){ ## columns 3 to 45 are the 43 genes we are interested in
+    c = i-2
+    polygenic_score = polygenic_score + brca_train_43_genes_scaled[j,i]*out3$estimate[c] ##calculate polygenic risk score by multiplying gene expression with MULTIVARIATE coefficient and summing up for all 43 genes
+  }
+  brca_train_43_genes_scaled$polygenic[j] = polygenic_score ## add polygenic score of that person to the column
+}
+```
+
+histogram of PRS
+```{r}
+hist(brca_train_43_genes_scaled$polygenic,main="Distribution of polygenic risk score scaled in training set (43 genes)",xlab="Polygenic risk score")
+```
+
+```{r}
+median(brca_train_43_genes_scaled$polygenic)
+```
+
+Categorize cases into high risk or low risk groups based on polygenic score
+in this case cutpoint is 0.3703944
+```{r}
+brca_train_43_genes_scaled$prognostic_cat <- ifelse(brca_train_43_genes_scaled$polygenic >= 0.37, "High PRS" ,"Low PRS") ## high is 1, low is 0
+```
+
+```{r}
+table(brca_train_43_genes_scaled$prognostic_cat)
+```
+
+histogram of PRS with cutoff
+```{r}
+hist(brca_train_43_genes_scaled$polygenic,main="Distribution of polygenic risk score in training set scaled (43 genes)",xlab="Polygenic risk score")
+abline(v=0.37, col="blue")
+```
+
+###############
+### PLOT KM CURVE function
+```{r}
+library(survival)
+library(survminer)
+# Create a function to plot the Kaplan-Meier curve
+plot_km_curve <- function(data, title) {
+  data <- as.data.frame(data)
+  
+  # Fit survival curves
+  fit <- survfit(Surv(data$survival_time_years, data$censored_status_opp) ~ prognostic_cat, data = data)
+  
+  # Plot
+  ggsurvplot(fit, data = data, 
+             pval = TRUE, conf.int = TRUE,
+             risk.table = TRUE, risk.table.col = "strata",
+             linetype = "strata", 
+             surv.median.line = "hv",
+             ggtheme = theme_bw(),
+             palette = c("red", "blue"),
+             title = title)
+}
+```
+################
+
+KM Survival curve + log rank test
+censored_status_opp (0 = alive, 1 = dead)
+
+```{r}
+plot_km_curve(brca_train_43_genes_scaled, "KM Curve for 43-Gene PRS (Training Set)")
+
+km_fit <- survfit(Surv(survival_time_years, censored_status_opp) ~ prognostic_cat, data=brca_train_43_genes_scaled)
+summary(km_fit, times = c(1,30,60,90*(1:10)))
+
+surv_plot <- ggsurvplot(
+  km_fit,
+  data = brca_train_43_genes_scaled,risk.table=T,
+  pval = TRUE
+)
+
+# Extract the ggplot object and add the legend guide
+surv_plot$plot <- surv_plot$plot + guides(colour = guide_legend(nrow = 1))
+
+# Print the updated plot
+print(surv_plot)
+```
+
+## C-INDEX with CI ##
+```{r}
+library(survcomp)
+
+# Compute C-index with CI
+cindex_result <- concordance.index(
+  x = brca_train_43_genes_scaled$polygenic, 
+  surv.time = brca_train_43_genes_scaled$survival_time_years, 
+  surv.event = brca_train_43_genes_scaled$censored_status_opp,
+  method = "noether"
+)
+
+# Output
+cindex_result$c.index        # C-index
+cindex_result$lower          # Lower 95% CI
+cindex_result$upper          # Upper 95% CI
+
+# Output (3dp)
+round(cindex_result$c.index,3)      # C-index
+round(cindex_result$lower,3)        # Lower 95% CI
+round(cindex_result$upper,3)        # Upper 95% CI
+```
+
+######### calibration plots #########
+training, 3 year survival
+```{r}
+library(pec)
+train_model_43 <- coxph(Surv(survival_time_years, censored_status_opp) ~ polygenic, data = brca_train_43_genes_scaled, x=TRUE,y=TRUE)
+calPlot(train_model_43, time=3, data=brca_train_43_genes_scaled,bars=T,legend=F,showFrequencies=T,type="survival")
+```
+
+training, 5 year survival
+```{r}
+calPlot(train_model_43, time=5, data=brca_train_43_genes_scaled,bars=T,legend=F,showFrequencies=T,type="survival")
+```
+
+#######################
+AUC(t) at 5 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_5_train = timeROC(T=brca_train_43_genes_scaled$survival_time_years, delta=brca_train_43_genes_scaled$censored_status_opp, marker=brca_train_43_genes_scaled$polygenic, cause=1,
+weighting = "marginal", times=c(0,5), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_5_train$AUC[2]
+auc_ci <- confint(auct_5_train, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+########################
+plot ROC curve at 5 years
+```{r}
+plot(auct_5_train,time=5)
+```
+
+#######################
+AUC(t) at 3 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_3_train = timeROC(T=brca_train_43_genes_scaled$survival_time_years, delta=brca_train_43_genes_scaled$censored_status_opp, marker=brca_train_43_genes_scaled$polygenic, cause=1,
+weighting = "marginal", times=c(0,3), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_3_train$AUC[2]
+auc_ci <- confint(auct_3_train, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+#######################
+plot ROC curve at 3 years
+```{r}
+plot(auct_3_train,time=3)
+```
+
+## try on 20% TCGA test set ##
+
+select the 43 genes from 20% test set
+```{r}
+brca_test_43_genes_scaled = dplyr::select(brca_test_cleaned_scaled, c(1:2, out3$term)) ## select outcomes and the 43 genes
+```
+
+Save brca_test_43_genes_scaled as csv
+```{r}
+write.csv(brca_test_43_genes_scaled,"brca_test_43_genes_scaled.csv")
+```
+
+# calculate polygenic risk score for the 43 selected genes
+
+the 43 genes are columns 3 to 45
+gene expression x multivariate cox coefficient for each subject
+there are 206 subjects in the TCGA test set
+```{r}
+brca_test_43_genes_scaled$polygenic = c()
+for (j in 1:206){
+  polygenic_score = 0
+  for (i in 3:45){ ## columns 3 to 45 are the 43 genes we are interested in
+    c = i-2
+    polygenic_score = polygenic_score + brca_test_43_genes_scaled[j,i]*out3$estimate[c] ##calculate polygenic risk score by multiplying gene expression with multi cox coefficient and summing up for all 43 genes
+  }
+  brca_test_43_genes_scaled$polygenic[j] = polygenic_score ## add polygenic score of that person to the column
+}
+```
+
+histogram of PRS
+```{r}
+hist(brca_test_43_genes_scaled$polygenic,main="Distribution of polygenic risk score for test set scaled (43 genes)",xlab="Polygenic risk score")
+abline(v=0.37, col="blue")
+```
+
+Categorize cases into high risk or low risk groups based on polygenic score
+use back same cutpoint as training
+```{r}
+brca_test_43_genes_scaled$prognostic_cat <- ifelse(brca_test_43_genes_scaled$polygenic >= 0.37, "High PRS" ,"Low PRS") ## high is 1, low is 0
+```
+
+```{r}
+table(brca_test_43_genes_scaled$prognostic_cat)
+```
+
+KM Survival curve + log rank test
+```{r}
+plot_km_curve(brca_test_43_genes_scaled, "KM Curve for 43-Gene PRS (Test Set)")
+
+km_fit <- survfit(Surv(survival_time_years, censored_status_opp) ~ prognostic_cat, data=brca_test_43_genes_scaled)
+summary(km_fit, times = c(1,30,60,90*(1:10)))
+
+surv_plot <- ggsurvplot(
+  km_fit,
+  data = brca_test_43_genes_scaled,
+  pval = TRUE
+)
+
+# Extract the ggplot object and add the legend guide
+surv_plot$plot <- surv_plot$plot + guides(colour = guide_legend(nrow = 1))
+
+# Print the updated plot
+print(surv_plot)
+```
+
+#########################
+### C-INDEX
+
+```{r}
+library(survcomp)
+
+# Compute C-index with CI
+cindex_result <- concordance.index(
+  x = brca_test_43_genes_scaled$polygenic, 
+  surv.time = brca_test_43_genes_scaled$survival_time_years, 
+  surv.event = brca_test_43_genes_scaled$censored_status_opp,
+  method = "noether"
+)
+
+# Output
+cindex_result$c.index        # C-index
+cindex_result$lower          # Lower 95% CI
+cindex_result$upper          # Upper 95% CI
+
+# Output (3dp)
+round(cindex_result$c.index,3)      # C-index
+round(cindex_result$lower,3)        # Lower 95% CI
+round(cindex_result$upper,3)        # Upper 95% CI
+```
+######### calibration plots #########
+test, 3 year survival
+```{r}
+library(pec)
+calPlot(train_model_43, time=3, data=brca_test_43_genes_scaled,bars=T,legend=F,showFrequencies=T,type="survival")
+```
+
+test, 5 year survival
+```{r}
+calPlot(train_model_43, time=5, data=brca_test_43_genes_scaled,bars=T,legend=F,showFrequencies=T,type="survival")
+```
+
+#######################
+AUC(t) at 5 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_5_test = timeROC(T=brca_test_43_genes_scaled$survival_time_years, delta=brca_test_43_genes_scaled$censored_status_opp, marker=brca_test_43_genes_scaled$polygenic, cause=1,
+weighting = "marginal", times=c(0,5), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_5_test$AUC[2]
+auc_ci <- confint(auct_5_test, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+#########################
+
+plot roc curve at 5 year
+```{r}
+plot(auct_5_test,time=5)
+```
+
+#######################
+AUC(t) at 3 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_3_test = timeROC(T=brca_test_43_genes_scaled$survival_time_years, delta=brca_test_43_genes_scaled$censored_status_opp, marker=brca_test_43_genes_scaled$polygenic, cause=1,
+weighting = "marginal", times=c(0,3), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_3_test$AUC[2]
+auc_ci <- confint(auct_3_test, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+
+plot roc curve at 3 year
+```{r}
+plot(auct_3_test,time=3)
+```
+
+## TEST on METABRIC DATASET ##
+select the 43 genes from METABRIC
+```{r}
+metabric_43_genes = dplyr::select(metabric_cleaned_scaled, c(1:2,out3$term)) ## select outcomes and the 43 genes
+```
+
+# calculate polygenic risk score for the 43 selected genes in METABRIC
+there are 1904 subjects
+```{r}
+metabric_43_genes$polygenic = c()
+for (j in 1:1904){
+  polygenic_score = 0
+  for (i in 3:45){ ## columns 3 to 45 are the 43 genes
+    c = i-2
+    polygenic_score = polygenic_score + metabric_43_genes[j,i]*out3$estimate[c]
+  }
+  metabric_43_genes$polygenic[j] = polygenic_score
+}
+```
+
+histogram of PRS
+```{r}
+hist(metabric_43_genes$polygenic,main="Polygenic risk score for METABRIC",xlab="Polygenic risk score")
+```
+
+Categorize cases into high risk or low risk groups based on polygenic score
+use same cutpoint as training set (0.37)
+```{r}
+metabric_43_genes$prognostic_cat <- ifelse(metabric_43_genes$polygenic >= 0.37, "High PRS" ,"Low PRS") ## high is 1, low is 0
+```
+
+```{r}
+table(metabric_43_genes$prognostic_cat)
+```
+
+plot survival curve
+KM Survival curve + log rank test
+```{r}
+plot_km_curve(metabric_43_genes, "KM Curve for 43-Gene PRS (METABRIC)")
+
+km_fit <- survfit(Surv(survival_time_years, censored_status_opp) ~ prognostic_cat, data=metabric_43_genes)
+summary(km_fit, times = c(1,30,60,90*(1:10)))
+
+surv_plot <- ggsurvplot(
+  km_fit,
+  data = metabric_43_genes,
+  pval = TRUE
+)
+
+# Extract the ggplot object and add the legend guide
+surv_plot$plot <- surv_plot$plot + guides(colour = guide_legend(nrow = 1))
+
+# Print the updated plot
+print(surv_plot)
+```
+
+## C-INDEX with CI ##
+```{r}
+library(survcomp)
+
+# Compute C-index with CI
+cindex_result <- concordance.index(
+  x = metabric_43_genes$polygenic, 
+  surv.time = metabric_43_genes$survival_time_years, 
+  surv.event = metabric_43_genes$censored_status_opp,
+  method = "noether"
+)
+
+# Output
+cindex_result$c.index        # C-index
+cindex_result$lower          # Lower 95% CI
+cindex_result$upper          # Upper 95% CI
+
+# Output (3dp)
+round(cindex_result$c.index,3)      # C-index
+round(cindex_result$lower,3)        # Lower 95% CI
+round(cindex_result$upper,3)        # Upper 95% CI
+```
+###########################
+
+######### calibration plots #########
+metabric, 3 year survival
+```{r}
+library(pec)
+calPlot(train_model_43, time=3, data=metabric_43_genes,bars=T,legend=F,showFrequencies=T,type="survival")
+```
+
+metabric, 5 year survival
+```{r}
+calPlot(train_model_43, time=5, data=metabric_43_genes,bars=T,legend=F,showFrequencies=T,type="survival")
+```
+
+#######################
+AUC(t) at 5 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_5_metabric = timeROC(T=metabric_43_genes$survival_time_years, delta=metabric_43_genes$censored_status_opp, marker=metabric_43_genes$polygenic, cause=1,
+weighting = "marginal", times=c(0,5), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_5_metabric$AUC[2]
+auc_ci <- confint(auct_5_metabric, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+########################
+plot metabric ROC 5-year
+```{r}
+plot(auct_5_metabric,time=5)
+```
+
+#######################
+AUC(t) at 3 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_3_metabric = timeROC(T=metabric_43_genes$survival_time_years, delta=metabric_43_genes$censored_status_opp, marker=metabric_43_genes$polygenic, cause=1,
+weighting = "marginal", times=c(0,3), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_3_metabric$AUC[2]
+auc_ci <- confint(auct_3_metabric, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+plot METABRIC ROC 3-year
+```{r}
+plot(auct_3_metabric,time=3)
+```
+
+### Validate on randomly selected samples of 43 genes ###
+
+## out of 11455 genes, randomly sample 43 genes from training set 1000 times and plot AUC(t)
+training first, then test (same set for test)
+```{r}
+brca_train_cleaned_scaled = read.csv("brca_train_cleaned_scaled.csv")
+brca_test_cleaned_scaled = read.csv("brca_test_cleaned_scaled.csv")
+brca_train_cleaned_scaled <- brca_train_cleaned_scaled[ , -1]
+brca_test_cleaned_scaled <- brca_test_cleaned_scaled[ , -1]
+```
+
+```{r}
+library(survival)
+## set seed
+set.seed(1)
+## initialise the output dataframe
+negative_control_output <-as.data.frame(matrix(nrow=1000,ncol=5))
+## add column names for output dataframe
+colnames(negative_control_output) = c("index","auct3train","auct5train","auct3test","auct5test")
+
+for (f in 1:1000){
+  ## select outcomes and the 43 RANDOM genes
+  brca_train_43_genes_random = dplyr::select(brca_train_cleaned_scaled, c(1:2, sample(c(3:11457),43, replace = FALSE, prob = NULL)))
+  ## do Multivariate Cox regression
+  multi_cox <- coxph(Surv(survival_time_years, censored_status_opp) ~ .,data = brca_train_43_genes_random)
+  ## save the multivariate cox hazard ratio
+  multi_cox_coefficients_43 = data.frame(multi_cox$coefficients)
+  ## calculate polygenic risk score for the randomly selected 43 genes
+  ## the 43 genes are columns 3 to 45
+  brca_train_43_genes_random$polygenic = c()
+  for (j in 1:722){
+    polygenic_score = 0
+    for (i in 3:45){ ## columns 3 to 45 are the 43 genes
+      c = i-2
+      polygenic_score = polygenic_score + brca_train_43_genes_random[j,i]*multi_cox_coefficients_43$multi_cox.coefficients[c]
+      }
+    brca_train_43_genes_random$polygenic[j] = polygenic_score ## add polygenic score of that person to the column
+    }
+  ## calculate the AUC(t) train at 3 years
+  auct_3_train_random = timeROC(T=brca_train_43_genes_random$survival_time_years,
+                                delta=brca_train_43_genes_random$censored_status_opp,marker=brca_train_43_genes_random$polygenic,
+                                cause=1,weighting = "cox", times=c(0,3), ROC = TRUE, iid = FALSE)
+  ## save AUC(t) 3 train value in dataframe
+  negative_control_output[f,1] = f
+  negative_control_output[f,2] = auct_3_train_random$AUC[2]
+  ## calculate the AUC(t) train at 5 years
+  auct_5_train_random = timeROC(T=brca_train_43_genes_random$survival_time_years,
+                                delta=brca_train_43_genes_random$censored_status_opp,marker=brca_train_43_genes_random$polygenic,
+                                cause=1,weighting = "cox", times=c(0,5), ROC = TRUE, iid = FALSE)
+  ## save AUC(t) 5 train value in dataframe
+  negative_control_output[f,3] = auct_5_train_random$AUC[2]
+  ## select the genes from test set
+  brca_test_43_genes_random = dplyr::select(brca_test_cleaned_scaled, c(1:2, colnames(brca_train_43_genes_random)[3:45]))
+  ## calculate polygenic risk score for the randomly selected 43 genes
+  ## the 43 genes are columns 3 to 45
+  brca_test_43_genes_random$polygenic = c()
+  for (j in 1:206){
+    polygenic_score = 0
+    for (i in 3:45){ ## columns 3 to 45 are the 43 genes
+      c = i-2
+      polygenic_score = polygenic_score + brca_test_43_genes_random[j,i]*multi_cox_coefficients_43$multi_cox.coefficients[c]
+      }
+    brca_test_43_genes_random$polygenic[j] = polygenic_score ## add polygenic score of that person to the column
+    }
+  ## calculate the AUC(t) test at 3 years
+  auct_3_test_random = timeROC(T=brca_test_43_genes_random$survival_time_years,
+                                delta=brca_test_43_genes_random$censored_status_opp,marker=brca_test_43_genes_random$polygenic,
+                                cause=1,weighting = "cox", times=c(0,3), ROC = TRUE, iid = FALSE)
+  ## save AUC(t) 3 test value in dataframe
+  negative_control_output[f,4] = auct_3_test_random$AUC[2]
+  ## calculate the AUC(t) train at 5 years
+  auct_5_test_random = timeROC(T=brca_test_43_genes_random$survival_time_years,
+                                delta=brca_test_43_genes_random$censored_status_opp,marker=brca_test_43_genes_random$polygenic,
+                                cause=1,weighting = "cox", times=c(0,5), ROC = TRUE, iid = FALSE)
+  ## save AUC(t) 5 test value in dataframe
+  negative_control_output[f,5] = auct_5_test_random$AUC[2]
+}
+
+### save the negative_control_output
+write.csv(negative_control_output,"negative_control_output.csv")
+```
+
+```{r}
+negative_control_output = read.csv("negative_control_output.csv")
+```
+
+plot random auct3 for train 0.958
+```{r}
+## plot
+den <- density(negative_control_output$auct3train)
+plot(den, col = "black", main = "Plot of 3-year AUC(t) for 1000 random iterations in train set",xlim=c(0.5,1.0))
+abline(v=0.958, col="red",lwd=2)
+abline(v=quantile(negative_control_output$auct3train, probs = 0.95),col="blue",lwd=2)
+range(negative_control_output$auct3train)
+```
+
+plot random auct5 for train 0.930
+```{r}
+## plot
+den <- density(negative_control_output$auct5train)
+plot(den, col = "black", main = "Plot of 5-year AUC(t) for 1000 random iterations in train set",xlim=c(0.5,1.0))
+abline(v=0.930, col="red",lwd=2)
+abline(v=quantile(negative_control_output$auct5train, probs = 0.95),col="blue",lwd=2)
+range(negative_control_output$auct5train)
+```
+
+plot random auct3 for test 0.736
+```{r}
+## plot
+den <- density(negative_control_output$auct3test)
+plot(den, col = "black", main = "Plot of 3-year AUC(t) for 1000 random iterations in test set",xlim=c(0.2,1.0))
+abline(v=0.736, col="red",lwd=2)
+abline(v=quantile(negative_control_output$auct3test, probs = 0.95),col="blue",lwd=2)
+range(negative_control_output$auct3test)
+```
+
+plot random auct5 for test 0.751
+```{r}
+## plot
+den <- density(negative_control_output$auct5test)
+plot(den, col = "black", main = "Plot of 5-year AUC(t) for 1000 random iterations in test set",xlim=c(0.2,1.0))
+abline(v=0.751, col="red",lwd=2)
+abline(v=quantile(negative_control_output$auct5test, probs = 0.95),col="blue",lwd=2)
+range(negative_control_output$auct5test)
+```
+
+## ADD CLINICAL DATA ##
+
+## incorporate clinical data train ##
+## include age ##
+```{r}
+library(dplyr)
+brca_train_recode = brca_train
+brca_train_recode$age_at_diagnosis_years = brca_train_recode$age_at_diagnosis/365
+```
+
+```{r}
+hist(brca_train_recode$age_at_diagnosis_years)
+```
+```{r}
+brca_train_with_clinical = cbind(brca_train_43_genes_scaled,brca_train_recode$age_at_diagnosis_years)
+```
+
+remove subjects with NAs
+```{r}
+brca_train_with_clinical2 = na.omit(brca_train_with_clinical)
+names(brca_train_with_clinical2)[50] <- "age_at_diagnosis_years"
+```
+
+## left with 713 subjects
+## incorporate clinical data for test set##
+```{r}
+brca_test_recode = brca_test
+brca_test_recode$age_at_diagnosis_years = brca_test_recode$age_at_diagnosis/365
+```
+
+```{r}
+brca_test_with_clinical = cbind(brca_test_43_genes_scaled,brca_test_recode$age_at_diagnosis_years)
+```
+
+remove subjects with NAs
+```{r}
+brca_test_with_clinical2 = na.omit(brca_test_with_clinical)
+names(brca_test_with_clinical2)[50] <- "age_at_diagnosis_years"
+```
+
+## left with 203 subjects
+
+```{r}
+write.csv(brca_test_with_clinical2,"brca_test_with_clinical2.csv")
+write.csv(brca_train_with_clinical2,"brca_train_with_clinical2.csv")
+```
+
+#### incorporate clinical data into PRS for train set ###
+
+```{r}
+## select outcomes, gene columns and age
+brca_train_with_clinical3 = dplyr::select(brca_train_with_clinical2, c(1:45,50))
+#brca_train_with_clinical3 = dplyr::select(brca_train_with_clinical2, c(1:45,48:49,51,53:54))
+```
+
+Multivariate Cox regression (genes + clinical)
+```{r}
+library(survival)
+set.seed(1)
+multi_cox <- coxph(Surv(survival_time_years, censored_status_opp) ~ .,data = brca_train_with_clinical3)
+summary(multi_cox)
+```
+
+save the multivariate cox results
+```{r}
+library(broom)
+out_gene_clinical = tidy(multi_cox)
+write.csv(out_gene_clinical,"out_genetic_clinical_train.csv")
+```
+
+# calculate polygenic risk score for the 43 selected genes plus clinical vars
+
+sum up gene expression x MULTIVARIATE cox coefficient to get the PRS for each person
+```{r}
+brca_train_with_clinical3$polygenic = c()
+for (j in 1:713){
+  polygenic_score = 0
+  for (i in 3:46){ ## columns 3 to 46 are the genes plus age
+    c = i-2
+    polygenic_score = polygenic_score + brca_train_with_clinical3[j,i]*out_gene_clinical$estimate[c] ##calculate polygenic risk score by multiplying gene expression with MULTIVARIATE coefficient and summing up
+  }
+  brca_train_with_clinical3$polygenic[j] = polygenic_score ## add polygenic score of that person to the column
+}
+```
+
+histogram of PRS
+```{r}
+hist(brca_train_with_clinical3$polygenic,main="Distribution of PRS scaled in training set (43 genes + clinical)",xlab="Polygenic risk score")
+```
+
+```{r}
+median(brca_train_with_clinical3$polygenic)
+```
+
+Categorize cases into high risk or low risk groups based on polygenic score
+```{r}
+brca_train_with_clinical3$prognostic_cat <- ifelse(brca_train_with_clinical3$polygenic >= 0.775, "High PRS" ,"Low PRS") ## high is 1, low is 0
+```
+
+```{r}
+table(brca_train_with_clinical3$prognostic_cat)
+```
+
+histogram of PRS with cutoff
+```{r}
+hist(brca_train_with_clinical3$polygenic,main="Distribution of PRS in training set scaled (43 genes + clinical)",xlab="Polygenic risk score")
+abline(v=0.775, col="blue")
+```
+
+```{r}
+head(brca_train_with_clinical3)
+save(brca_train_with_clinical3, file = "brca_train_with_clinical3.Rdata")
+write.csv(brca_train_with_clinical3,"brca_train_with_clinical3.csv")
+```
+
+KM Survival curve + log rank test
+censored_status_opp (0 is alive, 1 is dead)
+```{r}
+plot_km_curve(brca_train_with_clinical3, "KM Curve for Genetic + Clinical PRS (Training Set)")
+
+km_fit <- survfit(Surv(survival_time_years, censored_status_opp) ~ prognostic_cat, data=brca_train_with_clinical3)
+summary(km_fit, times = c(1,30,60,90*(1:10)))
+
+surv_plot <- ggsurvplot(
+  km_fit,
+  data = brca_train_with_clinical3,
+  pval = TRUE
+)
+
+# Extract the ggplot object and add the legend guide
+surv_plot$plot <- surv_plot$plot + guides(colour = guide_legend(nrow = 1))
+
+# Print the updated plot
+print(surv_plot)
+```
+
+## C-INDEX with CI ##
+```{r}
+library(survcomp)
+
+# Compute C-index with CI
+cindex_result <- concordance.index(
+  x = brca_train_with_clinical3$polygenic, 
+  surv.time = brca_train_with_clinical3$survival_time_years, 
+  surv.event = brca_train_with_clinical3$censored_status_opp,
+  method = "noether"
+)
+
+# Output
+cindex_result$c.index        # C-index
+cindex_result$lower          # Lower 95% CI
+cindex_result$upper          # Upper 95% CI
+
+# Output (3dp)
+round(cindex_result$c.index,3)      # C-index
+round(cindex_result$lower,3)        # Lower 95% CI
+round(cindex_result$upper,3)        # Upper 95% CI
+```
+###########################
+calibration plots, training with clinical
+###########################
+
+######### calibration plots #########
+train with clinical, 3 year survival
+```{r}
+library(pec)
+train_model_43_clin <- coxph(Surv(survival_time_years, censored_status_opp) ~ polygenic, data = brca_train_with_clinical3, x=TRUE,y=TRUE)
+calPlot(train_model_43_clin, time=3, data=brca_train_with_clinical3,bars=T,legend=F,showFrequencies=T,type="survival")
+```
+
+train with clinical, 5 year survival
+```{r}
+calPlot(train_model_43_clin, time=5, data=brca_train_with_clinical3,bars=T,legend=F,showFrequencies=T,type="survival")
+```
+
+AUC(t) at 5 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_5_train_w_clin = timeROC(T=brca_train_with_clinical3$survival_time_years, delta=brca_train_with_clinical3$censored_status_opp, marker=brca_train_with_clinical3$polygenic, cause=1,
+weighting = "marginal", times=c(0,5), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_5_train_w_clin$AUC[2]
+auc_ci <- confint(auct_5_train_w_clin, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+plot ROC curve at 5 years
+```{r}
+plot(auct_5_train_w_clin,time=5)
+```
+#######################
+AUC(t) at 3 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_3_train_w_clin = timeROC(T=brca_train_with_clinical3$survival_time_years, delta=brca_train_with_clinical3$censored_status_opp, marker=brca_train_with_clinical3$polygenic, cause=1,
+weighting = "marginal", times=c(0,3), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_3_train_w_clin$AUC[2]
+auc_ci <- confint(auct_3_train_w_clin, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+plot ROC curve at 3 years
+```{r}
+plot(auct_3_train_w_clin,time=3)
+```
+
+## try on 20% test set ##
+```{r}
+brca_test_with_clinical3 = dplyr::select(brca_test_with_clinical2, c(1:45,50))
+```
+
+# calculate polygenic risk score
+```{r}
+brca_test_with_clinical3$polygenic = c()
+for (j in 1:203){
+  polygenic_score = 0
+  for (i in 3:46){
+    c = i-2
+    polygenic_score = polygenic_score + brca_test_with_clinical3[j,i]*out_gene_clinical$estimate[c] ##calculate polygenic risk score by multiplying gene expression with multi cox coefficient and summing up
+  }
+  brca_test_with_clinical3$polygenic[j] = polygenic_score ## add polygenic score of that person to the column
+}
+```
+
+histogram of PRS
+```{r}
+hist(brca_test_with_clinical3$polygenic,main="Distribution of PRS for test set scaled (43 genes + clinical)",xlab="Polygenic risk score")
+abline(v=0.775, col="blue")
+```
+
+Categorize cases into high risk or low risk groups based on polygenic score
+use back same cutpoint as training which is 0.775
+```{r}
+brca_test_with_clinical3$prognostic_cat <- ifelse(brca_test_with_clinical3$polygenic >= 0.775, "High PRS" ,"Low PRS") ## high is 1, low is 0
+```
+
+```{r}
+table(brca_test_with_clinical3$prognostic_cat)
+```
+
+KM Survival curve + log rank test
+```{r}
+plot_km_curve(brca_test_with_clinical3, "KM Curve for Genetic + Clinical PRS (Test Set)")
+
+km_fit <- survfit(Surv(survival_time_years, censored_status_opp) ~ prognostic_cat, data=brca_test_with_clinical3)
+summary(km_fit, times = c(1,30,60,90*(1:10)))
+
+surv_plot <- ggsurvplot(
+  km_fit,
+  data = brca_test_with_clinical3,
+  pval = TRUE
+)
+
+# Extract the ggplot object and add the legend guide
+surv_plot$plot <- surv_plot$plot + guides(colour = guide_legend(nrow = 1))
+
+# Print the updated plot
+print(surv_plot)
+```
+
+## C-INDEX with CI ##
+```{r}
+library(survcomp)
+
+# Compute C-index with CI
+cindex_result <- concordance.index(
+  x = brca_test_with_clinical3$polygenic, 
+  surv.time = brca_test_with_clinical3$survival_time_years, 
+  surv.event = brca_test_with_clinical3$censored_status_opp,
+  method = "noether"
+)
+
+# Output
+cindex_result$c.index        # C-index
+cindex_result$lower          # Lower 95% CI
+cindex_result$upper          # Upper 95% CI
+
+# Output (3dp)
+round(cindex_result$c.index,3)      # C-index
+round(cindex_result$lower,3)        # Lower 95% CI
+round(cindex_result$upper,3)        # Upper 95% CI
+```
+###########################
+calibration, test with clinical
+
+######### calibration plots #########
+test with clinical, 3 year survival
+```{r}
+library(pec)
+calPlot(train_model_43_clin, time=3, data=brca_test_with_clinical3,bars=T,legend=F,showFrequencies=T,type="survival")
+```
+
+test with clinical, 5 year survival
+```{r}
+calPlot(train_model_43_clin, time=5, data=brca_test_with_clinical3,bars=T,legend=F,showFrequencies=T,type="survival")
+```
+
+#######################
+AUC(t) at 5 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_5_test_w_clin = timeROC(T=brca_test_with_clinical3$survival_time_years, delta=brca_test_with_clinical3$censored_status_opp, marker=brca_test_with_clinical3$polygenic, cause=1,
+weighting = "marginal", times=c(0,5), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_5_test_w_clin$AUC[2]
+auc_ci <- confint(auct_5_test_w_clin, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+plot roc curve at 5 year
+```{r}
+plot(auct_5_test_w_clin,time=5)
+```
+#######################
+AUC(t) at 3 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_3_test_w_clin = timeROC(T=brca_test_with_clinical3$survival_time_years, delta=brca_test_with_clinical3$censored_status_opp, marker=brca_test_with_clinical3$polygenic, cause=1,
+weighting = "marginal", times=c(0,3), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_3_test_w_clin$AUC[2]
+auc_ci <- confint(auct_3_test_w_clin, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+plot roc curve at 3 year
+```{r}
+plot(auct_3_test_w_clin,time=3)
+```
+
+#### clinical-only PRS for train set ####
+```{r}
+brca_train_with_clinical_only = dplyr::select(brca_train_with_clinical2, c(1:2,50))
+```
+
+Multivariate Cox regression
+```{r}
+library(survival)
+set.seed(1)
+multi_cox <- coxph(Surv(survival_time_years, censored_status_opp) ~ .,data = brca_train_with_clinical_only)
+summary(multi_cox)
+```
+
+save the multivariate cox results
+```{r}
+library(broom)
+out_clinical = tidy(multi_cox)
+```
+
+save the multivariate cox results
+```{r}
+write.csv(out_clinical,"out_clinical.csv")
+```
+
+# calculate polygenic risk score for just the clinical vars
+```{r}
+brca_train_with_clinical_only$polygenic = c()
+for (j in 1:713){
+  polygenic_score = 0
+  for (i in 3:3){
+    c = i-2
+    polygenic_score = polygenic_score + brca_train_with_clinical_only[j,i]*out_clinical$estimate[c]
+  }
+  brca_train_with_clinical_only$polygenic[j] = polygenic_score ## add polygenic score of that person to the column
+}
+```
+
+histogram of PRS
+```{r}
+hist(brca_train_with_clinical_only$polygenic,main="Distribution of PRS scaled in training set (clinical)",xlab="Polygenic risk score")
+```
+
+```{r}
+median(brca_train_with_clinical_only$polygenic)
+```
+Categorize cases into high risk or low risk groups based on polygenic score
+in this case cutpoint is 2.4757
+```{r}
+brca_train_with_clinical_only$prognostic_cat <- ifelse(brca_train_with_clinical_only$polygenic >= 2.4757, "High PRS" ,"Low PRS") ## high is 1, low is 0
+```
+
+```{r}
+table(brca_train_with_clinical_only$prognostic_cat)
+```
+
+histogram of PRS with cutoff
+```{r}
+hist(brca_train_with_clinical_only$polygenic,main="Distribution of PRS in training set scaled (clinical)",xlab="Polygenic risk score")
+abline(v=2.4757, col="blue")
+```
+
+KM Survival curve + log rank test
+censored_status_opp (0 is alive, 1 is dead)
+```{r}
+plot_km_curve(brca_train_with_clinical_only, "KM Curve for Clinical PRS (Training Set)")
+
+km_fit <- survfit(Surv(survival_time_years, censored_status_opp) ~ prognostic_cat, data=brca_train_with_clinical_only)
+summary(km_fit, times = c(1,30,60,90*(1:10)))
+
+surv_plot <- ggsurvplot(
+  km_fit,
+  data = brca_train_with_clinical_only,
+  pval = TRUE
+)
+
+# Extract the ggplot object and add the legend guide
+surv_plot$plot <- surv_plot$plot + guides(colour = guide_legend(nrow = 1))
+
+# Print the updated plot
+print(surv_plot)
+```
+## C-INDEX with CI ##
+```{r}
+library(survcomp)
+
+# Compute C-index with CI
+cindex_result <- concordance.index(
+  x = brca_train_with_clinical_only$polygenic, 
+  surv.time = brca_train_with_clinical_only$survival_time_years, 
+  surv.event = brca_train_with_clinical_only$censored_status_opp,
+  method = "noether"
+)
+
+# Output
+cindex_result$c.index        # C-index
+cindex_result$lower          # Lower 95% CI
+cindex_result$upper          # Upper 95% CI
+
+# Output (3dp)
+round(cindex_result$c.index,3)      # C-index
+round(cindex_result$lower,3)        # Lower 95% CI
+round(cindex_result$upper,3)        # Upper 95% CI
+```
+
+
+AUC(t) at 5 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_5_train_clin_only = timeROC(T=brca_train_with_clinical_only$survival_time_years, delta=brca_train_with_clinical_only$censored_status_opp, marker=brca_train_with_clinical_only$polygenic, cause=1,
+weighting = "marginal", times=c(0,5), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_5_train_clin_only$AUC[2]
+auc_ci <- confint(auct_5_train_clin_only, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+plot ROC curve at 5 years
+```{r}
+plot(auct_5_train_clin_only,time=5)
+```
+#######################
+AUC(t) at 3 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_3_train_clin_only = timeROC(T=brca_train_with_clinical_only$survival_time_years, delta=brca_train_with_clinical_only$censored_status_opp, marker=brca_train_with_clinical_only$polygenic, cause=1,
+weighting = "marginal", times=c(0,3), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_3_train_clin_only$AUC[2]
+auc_ci <- confint(auct_3_train_clin_only, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+plot ROC curve at 3 years
+```{r}
+plot(auct_3_train_clin_only,time=3)
+```
+
+## test clinical-only PRS in 20% test set ##
+```{r}
+brca_test_with_clinical_only = dplyr::select(brca_test_with_clinical3, c(1:2,46))
+```
+###########################
+# calculate polygenic risk score
+gene expression x multivariate cox coefficient for EACH person
+```{r}
+brca_test_with_clinical_only$polygenic = c()
+for (j in 1:203){
+  polygenic_score = 0
+  for (i in 3:3){
+    c = i-2
+    polygenic_score = polygenic_score + brca_test_with_clinical_only[j,i]*out_clinical$estimate[c]
+  }
+  brca_test_with_clinical_only$polygenic[j] = polygenic_score ## add polygenic score of that person to the column
+}
+```
+
+histogram of PRS
+```{r}
+hist(brca_test_with_clinical_only$polygenic,main="Distribution of PRS for test set scaled (clinical)",xlab="Polygenic risk score")
+abline(v=2.4757, col="blue")
+```
+
+Categorize cases into high risk or low risk groups based on polygenic score
+use back same cutpoint as training which is 2.4757
+```{r}
+brca_test_with_clinical_only$prognostic_cat <- ifelse(brca_test_with_clinical_only$polygenic >= 2.4757, "High PRS" ,"Low PRS") ## high is 1, low is 0
+```
+
+```{r}
+table(brca_test_with_clinical_only$prognostic_cat)
+```
+
+KM Survival curve + log rank test
+```{r}
+plot_km_curve(brca_test_with_clinical_only, "KM Curve for Clinical PRS (Test Set)")
+
+km_fit <- survfit(Surv(survival_time_years, censored_status_opp) ~ prognostic_cat, data=brca_test_with_clinical_only)
+summary(km_fit, times = c(1,30,60,90*(1:10)))
+
+surv_plot <- ggsurvplot(
+  km_fit,
+  data = brca_test_with_clinical_only,
+  pval = TRUE
+)
+
+# Extract the ggplot object and add the legend guide
+surv_plot$plot <- surv_plot$plot + guides(colour = guide_legend(nrow = 1))
+
+# Print the updated plot
+print(surv_plot)
+```
+
+## C-INDEX with CI ##
+```{r}
+library(survcomp)
+
+# Compute C-index with CI
+cindex_result <- concordance.index(
+  x = brca_test_with_clinical_only$polygenic, 
+  surv.time = brca_test_with_clinical_only$survival_time_years, 
+  surv.event = brca_test_with_clinical_only$censored_status_opp,
+  method = "noether"
+)
+
+# Output
+cindex_result$c.index        # C-index
+cindex_result$lower          # Lower 95% CI
+cindex_result$upper          # Upper 95% CI
+
+# Output (3dp)
+round(cindex_result$c.index,3)      # C-index
+round(cindex_result$lower,3)        # Lower 95% CI
+round(cindex_result$upper,3)        # Upper 95% CI
+```
+###########################
+#######################
+AUC(t) at 5 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_5_test_clin_only = timeROC(T=brca_test_with_clinical_only$survival_time_years, delta=brca_test_with_clinical_only$censored_status_opp, marker=brca_test_with_clinical_only$polygenic, cause=1,
+weighting = "marginal", times=c(0,5), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_5_test_clin_only$AUC[2]
+auc_ci <- confint(auct_5_test_clin_only, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+plot roc curve at 5 year
+```{r}
+plot(auct_5_test_clin_only,time=5)
+```
+#######################
+AUC(t) at 3 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_3_test_clin_only = timeROC(T=brca_test_with_clinical_only$survival_time_years, delta=brca_test_with_clinical_only$censored_status_opp, marker=brca_test_with_clinical_only$polygenic, cause=1,
+weighting = "marginal", times=c(0,3), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_3_test_clin_only$AUC[2]
+auc_ci <- confint(auct_3_test_clin_only, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+plot roc curve at 3 year
+```{r}
+plot(auct_3_test_clin_only,time=3)
+```
+
+#### METABRIC GENETIC + CLINICAL
+
+```{r}
+metabric_43_genes_plus_age = cbind(metabric_43_genes[,1:45],metabric_merge$AGE_AT_DIAGNOSIS)
+```
+
+```{r}
+names(metabric_43_genes_plus_age)[46] <- "AGE_AT_DIAGNOSIS"
+```
+
+# calculate polygenic risk score for the 43 selected genes + age in METABRIC
+there are 1904 subjects
+```{r}
+metabric_43_genes_plus_age$polygenic = c()
+for (j in 1:1904){
+  polygenic_score = 0
+  for (i in c(3:46)){
+    c = i-2
+    polygenic_score = polygenic_score + metabric_43_genes_plus_age[j,i]*out_gene_clinical$estimate[c]
+  }
+  metabric_43_genes_plus_age$polygenic[j] = polygenic_score
+}
+```
+
+histogram of PRS
+```{r}
+hist(metabric_43_genes_plus_age$polygenic,main="Polygenic risk score for METABRIC (Genetic + Clinical)",xlab="Polygenic risk score")
+```
+
+Categorize cases into high risk or low risk groups based on polygenic score
+use same cutpoint as genetic plus clinical training set (0.775)
+```{r}
+metabric_43_genes_plus_age$prognostic_cat <- ifelse(metabric_43_genes$polygenic >= 0.775, "High PRS" ,"Low PRS") ## high is 1, low is 0
+```
+
+```{r}
+table(metabric_43_genes_plus_age$prognostic_cat)
+```
+
+plot survival curve
+KM Survival curve + log rank test
+```{r}
+plot_km_curve(metabric_43_genes_plus_age, "KM Curve for 43-Gene + Clinical PRS (METABRIC)")
+
+km_fit <- survfit(Surv(survival_time_years, censored_status_opp) ~ prognostic_cat, data=metabric_43_genes_plus_age)
+summary(km_fit, times = c(1,30,60,90*(1:10)))
+
+surv_plot <- ggsurvplot(
+  km_fit,
+  data = metabric_43_genes_plus_age,
+  pval = TRUE
+)
+
+# Extract the ggplot object and add the legend guide
+surv_plot$plot <- surv_plot$plot + guides(colour = guide_legend(nrow = 1))
+
+# Print the updated plot
+print(surv_plot)
+```
+
+## C-INDEX with CI ##
+```{r}
+library(survcomp)
+# Compute C-index with CI
+cindex_result <- concordance.index(
+  x = metabric_43_genes_plus_age$polygenic, 
+  surv.time = metabric_43_genes_plus_age$survival_time_years, 
+  surv.event = metabric_43_genes_plus_age$censored_status_opp,
+  method = "noether"
+)
+
+# Output
+cindex_result$c.index        # C-index
+cindex_result$lower          # Lower 95% CI
+cindex_result$upper          # Upper 95% CI
+
+# Output (3dp)
+round(cindex_result$c.index,3)      # C-index
+round(cindex_result$lower,3)        # Lower 95% CI
+round(cindex_result$upper,3)        # Upper 95% CI
+```
+
+######### calibration plots #########
+metabric with clinical, 3 year survival
+```{r}
+library(pec)
+calPlot(train_model_43_clin, time=3, data=metabric_43_genes_plus_age,bars=T,legend=F,showFrequencies=T,type="survival")
+```
+
+metabric with clinical, 5 year survival
+```{r}
+calPlot(train_model_43_clin, time=5, data=metabric_43_genes_plus_age,bars=T,legend=F,showFrequencies=T,type="survival")
+```
+
+#######################
+AUC(t) at 5 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_5_metabric_clin = timeROC(T=metabric_43_genes_plus_age$survival_time_years, delta=metabric_43_genes_plus_age$censored_status_opp, marker=metabric_43_genes_plus_age$polygenic, cause=1,
+weighting = "marginal", times=c(0,5), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_5_metabric_clin$AUC[2]
+auc_ci <- confint(auct_5_metabric_clin, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+########################
+
+plot metabric ROC 5-year
+```{r}
+plot(auct_5_metabric_clin,time=5)
+```
+
+#######################
+AUC(t) at 3 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_3_metabric_clin = timeROC(T=metabric_43_genes_plus_age$survival_time_years, delta=metabric_43_genes_plus_age$censored_status_opp, marker=metabric_43_genes_plus_age$polygenic, cause=1,
+weighting = "marginal", times=c(0,3), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_3_metabric_clin$AUC[2]
+auc_ci <- confint(auct_3_metabric_clin, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+plot METABRIC ROC 3-year
+```{r}
+plot(auct_3_metabric_clin,time=3)
+```
+
+############### TRY ON ANOTHER INDEPENDENT EXTERNAL TEST SET #######
+downloaded data from https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE96058
+downloaded and unzipped supplementary file "gene expression"
+GSE96058 has also been used by other studies (see additional file 1)
+
+## download expression data
+```{r}
+GSE96058 <- read.csv("GSE96058/GSE96058_gene_expression_3273_samples_and_136_replicates_transformed.csv")
+```
+
+check for the 43 genes
+43 genes: out3$genesymbol
+```{r}
+overlapping_GSE96058 = intersect(out3$genesymbol,GSE96058$X)
+length(overlapping_GSE96058)
+```
+
+## download clinical data
+```{r}
+library(GEOquery)
+
+# Read the GEO Series Matrix file
+GSE96058_series <- getGEO("GSE96058", GSEMatrix = TRUE)
+
+# Sample metadata (phenotype)
+pheno_data <- pData(GSE96058_series[[1]])
+```
+
+check that all samples are GPL11154 
+```{r}
+table(pheno_data$platform_id)
+```
+
+## read in ids to match F1, F2, F3 etc to GSM
+downloaded here: https://www.ncbi.nlm.nih.gov/geo/browse/?view=samples&series=96058 
+```{r}
+GSE96058_ids = read.csv("GSE96058/sample.csv")
+```
+
+## match Ids
+```{r}
+pheno_data$GSM_ID <- rownames(pheno_data)
+
+# Match GSM IDs and extract Internal_ID
+pheno_data$Internal_ID <- GSE96058_ids$Title[match(pheno_data$GSM_ID, GSE96058_ids$Accession)]
+
+# View updated pheno_data
+head(pheno_data)
+```
+
+```{r}
+write.csv(pheno_data, "GSE96058/pheno_data.csv")
+```
+
+read in pheno data
+```{r}
+pheno_data = read.csv("GSE96058/pheno_data.csv")
+```
+
+
+## extract list of sample internal ids that are common in both gene expression and clinical datasets
+```{r}
+overlapping_ID_GSE96058 = intersect(pheno_data$title,colnames(GSE96058))
+length(overlapping_ID_GSE96058)
+```
+## 3069 samples that we can use in the GSE96058 dataset!
+
+clean up GSE96058 dataset
+select the 3069 sample columns: overlapping_ID_GSE96058
+```{r}
+library(dplyr)
+
+# Select columns from the dataframe using dplyr
+GSE96058_exp <- GSE96058 %>%
+  dplyr::select(X,all_of(overlapping_ID_GSE96058))
+
+# Filter rows where column X matches selected 43 gene names
+GSE96058_exp_43 <- GSE96058_exp %>%
+  filter(X %in% overlapping_GSE96058)
+```
+
+save files
+```{r}
+write.csv(GSE96058_exp, "GSE96058/processed/GSE96058_exp.csv")
+write.csv(GSE96058_exp_43, "GSE96058/processed/GSE96058_exp_43.csv")
+```
+
+clean up clinical dataset
+select the 3069 sample rows: overlapping_ID_GSE96058
+```{r}
+# Filter rows where column title matches sample names
+GSE96058_clinical <- pheno_data %>%
+  filter(title %in% overlapping_ID_GSE96058)
+```
+
+```{r}
+write.csv(GSE96058_clinical, "GSE96058/processed/GSE96058_clinical.csv")
+```
+
+transpose expression data
+```{r}
+# Set row names before transposing
+row.names(GSE96058_exp_43) <- GSE96058_exp_43$X
+
+# Transpose and keep column names as a new column
+GSE96058_expression_43 <- as.data.frame(t(GSE96058_exp_43))
+
+GSE96058_expression_43 = GSE96058_expression_43[-1,]
+
+# Add the original column names (now rownames) as a new column
+GSE96058_expression_43$Internal_ID <- rownames(GSE96058_expression_43)
+
+# Move Internal_ID to the first column
+GSE96058_expression_43 <- GSE96058_expression_43 %>%
+  dplyr::select(Internal_ID, everything())
+
+# View the result
+head(GSE96058_expression_43)
+```
+
+merge clinical and genetic
+clinical: GSE96058_clinical
+genetic: GSE96058_expression_43
+```{r}
+GSE96058_clinical$Internal_ID = GSE96058_clinical$title
+library(dplyr)
+
+GSE96058_merged <- GSE96058_expression_43 %>%
+  left_join(GSE96058_clinical, by = "Internal_ID")
+```
+
+remove technical replicates
+```{r}
+library(dplyr)
+
+# Remove rows where "ID" contains "repl"
+GSE96058_merged <- GSE96058_merged %>%
+  filter(!grepl("repl", Internal_ID))
+```
+left with 2969
+
+```{r}
+write.csv(GSE96058_merged, "GSE96058/processed/GSE96058_merged.csv")
+```
+
+create censored status opp
+```{r}
+GSE96058_merged$censored_status_opp <- ifelse(GSE96058_merged$overall.survival.event.ch1 == 1, 1, 0)
+```
+
+calculate "survival_time" variable
+```{r}
+GSE96058_merged$overall.survival.days.ch1=as.numeric(GSE96058_merged$overall.survival.days.ch1)
+GSE96058_merged$survival_time <- GSE96058_merged$overall.survival.days.ch1
+GSE96058_merged$survival_time_years = GSE96058_merged$survival_time/365
+```
+
+age distribution for GSE96058 data
+```{r}
+GSE96058_merged$AGE_AT_DIAGNOSIS = as.numeric(GSE96058_merged$age.at.diagnosis.ch1)
+hist(GSE96058_merged$AGE_AT_DIAGNOSIS,main="Age Distribution for GSE96058",xlab="Age at Diagnosis")
+```
+
+create variable for five year survival
+```{r}
+GSE96058_merged$five_year_survival <- ifelse(GSE96058_merged$survival_time_years>5, 1, 0)
+# Group by count using dplyr
+agg_tbl_5 <- GSE96058_merged %>% group_by(five_year_survival) %>% 
+  summarise(total_count=n(),
+            .groups = 'drop')
+agg_tbl_5
+```
+
+create variable for three year survival
+```{r}
+GSE96058_merged$three_year_survival <- ifelse(GSE96058_merged$survival_time_years>3, 1, 0)
+# Group by count using dplyr
+agg_tbl_3 <- GSE96058_merged %>% group_by(three_year_survival) %>% 
+  summarise(total_count=n(),
+            .groups = 'drop')
+agg_tbl_3
+```
+
+save GSE96058_merged
+```{r}
+write.csv(GSE96058_merged,"GSE96058/processed/GSE96058_merged.csv")
+```
+
+generate table of clinical demographic characteristics
+```{r}
+library(table1)
+clinical_table_GSE96058 <- table1(~AGE_AT_DIAGNOSIS + as.factor(five_year_survival) + as.factor(three_year_survival), data=GSE96058_merged)
+
+print(clinical_table_GSE96058)
+write.csv(clinical_table_GSE96058, file = "GSE96058/processed/clinical_table_GSE96058.csv")
+```
+
+```{r}
+genes_symbols_43 = as.character(out3$genesymbol)
+GSE96058_cleaned <- dplyr::select(
+  GSE96058_merged,
+  Internal_ID, AGE_AT_DIAGNOSIS, survival_time_years, censored_status_opp,
+  all_of(genes_symbols_43)
+)
+```
+
+convert to numeric
+```{r}
+library(dplyr)
+# Convert columns 5 to 47 to numeric
+GSE96058_cleaned <- GSE96058_cleaned %>%
+  mutate(across(5:47, ~ as.numeric(as.character(.))))
+```
+
+Z score scaling GSE96058 (independently)
+```{r}
+GSE96058_cleaned_scaled = cbind(GSE96058_cleaned[,1:4],scale(GSE96058_cleaned[,5:47]))
+```
+
+save
+```{r}
+write.csv(GSE96058_cleaned_scaled,"GSE96058/processed/GSE96058_cleaned_scaled.csv")
+```
+
+-----43 Gene PRS-------
+###################################
+# calculate polygenic risk score for the 43 selected genes in METABRIC
+there are 2969 subjects
+```{r}
+GSE96058_cleaned_scaled$polygenic = c()
+for (j in 1:2969){
+  polygenic_score = 0
+  for (i in 5:47){ ## columns 5 to 47 are the 43 genes
+    c = i-4
+    polygenic_score = polygenic_score + as.numeric(GSE96058_cleaned_scaled[j,i])*as.numeric(out3$estimate[c])
+  }
+  GSE96058_cleaned_scaled$polygenic[j] = polygenic_score
+}
+```
+
+histogram of PRS
+```{r}
+hist(GSE96058_cleaned_scaled$polygenic,main="Polygenic risk score for GSE96058",xlab="Polygenic risk score")
+```
+
+Categorize cases into high risk or low risk groups based on polygenic score
+use same cutpoint as training set (0.37)
+```{r}
+GSE96058_cleaned_scaled$prognostic_cat <- ifelse(GSE96058_cleaned_scaled$polygenic >= 0.37, "High PRS" ,"Low PRS") ## high is 1, low is 0
+```
+
+```{r}
+table(GSE96058_cleaned_scaled$prognostic_cat)
+```
+
+plot survival curve
+KM Survival curve + log rank test
+```{r}
+library(survival)
+library(ggplot2)
+plot_km_curve(GSE96058_cleaned_scaled, "KM Curve for 43-Gene PRS (GSE96058)")
+
+km_fit <- survfit(Surv(survival_time_years, censored_status_opp) ~ prognostic_cat, data=GSE96058_cleaned_scaled)
+summary(km_fit, times = c(1,30,60,90*(1:10)))
+
+surv_plot <- ggsurvplot(
+  km_fit,
+  data = GSE96058_cleaned_scaled,
+  pval = TRUE
+)
+
+# Extract the ggplot object and add the legend guide
+surv_plot$plot <- surv_plot$plot + guides(colour = guide_legend(nrow = 1))
+
+# Print the updated plot
+print(surv_plot)
+```
+
+## C-INDEX with CI ##
+```{r}
+library(survcomp)
+
+# Compute C-index with CI
+cindex_result <- concordance.index(
+  x = GSE96058_cleaned_scaled$polygenic, 
+  surv.time = GSE96058_cleaned_scaled$survival_time_years, 
+  surv.event = GSE96058_cleaned_scaled$censored_status_opp,
+  method = "noether"
+)
+
+# Output
+cindex_result$c.index        # C-index
+cindex_result$lower          # Lower 95% CI
+cindex_result$upper          # Upper 95% CI
+
+# Output (3dp)
+round(cindex_result$c.index,3)      # C-index
+round(cindex_result$lower,3)        # Lower 95% CI
+round(cindex_result$upper,3)        # Upper 95% CI
+```
+######### calibration plots #########
+GSE96058, 3 year survival
+```{r}
+library(pec)
+calPlot(train_model_43, time=3, data=GSE96058_cleaned_scaled,bars=T,legend=F,showFrequencies=T,type="survival")
+```
+
+GSE96058, 5 year survival
+```{r}
+calPlot(train_model_43, time=5, data=GSE96058_cleaned_scaled,bars=T,legend=F,showFrequencies=T,type="survival")
+```
+
+#######################
+AUC(t) at 5 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_5_gse = timeROC(T=GSE96058_cleaned_scaled$survival_time_years, delta=GSE96058_cleaned_scaled$censored_status_opp, marker=GSE96058_cleaned_scaled$polygenic, cause=1,
+weighting = "marginal", times=c(0,5), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_5_gse$AUC[2]
+auc_ci <- confint(auct_5_gse, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+########################
+plot gse ROC 5-year
+```{r}
+plot(auct_5_gse,time=5)
+```
+
+#######################
+AUC(t) at 3 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_3_gse = timeROC(T=GSE96058_cleaned_scaled$survival_time_years, delta=GSE96058_cleaned_scaled$censored_status_opp, marker=GSE96058_cleaned_scaled$polygenic, cause=1,
+weighting = "marginal", times=c(0,3), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_3_gse$AUC[2]
+auc_ci <- confint(auct_3_gse, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+plot ROC 3-year
+```{r}
+plot(auct_3_gse,time=3)
+```
+
+-----------------clinical + genetic PRS GSE96058 --------------------
+```{r}
+gse_cleaned_scaled_w_age = GSE96058_cleaned_scaled[,c(3:47,2)]
+```
+
+# calculate polygenic risk score for the 43 selected genes + age in GSE
+there are 2969 subjects
+```{r}
+gse_cleaned_scaled_w_age$polygenic = c()
+for (j in 1:2969){
+  polygenic_score = 0
+  for (i in c(3:46)){
+    c = i-2
+    polygenic_score = polygenic_score + gse_cleaned_scaled_w_age[j,i]*out_gene_clinical$estimate[c]
+  }
+  gse_cleaned_scaled_w_age$polygenic[j] = polygenic_score
+}
+```
+
+histogram of PRS
+```{r}
+hist(gse_cleaned_scaled_w_age$polygenic,main="Polygenic risk score for GSE96058 (Genetic + Clinical)",xlab="Polygenic risk score")
+```
+
+Categorize cases into high risk or low risk groups based on polygenic score
+use same cutpoint as genetic plus clinical training set (0.775)
+```{r}
+gse_cleaned_scaled_w_age$prognostic_cat <- ifelse(gse_cleaned_scaled_w_age$polygenic >= 0.775, "High PRS" ,"Low PRS") ## high is 1, low is 0
+```
+
+```{r}
+table(gse_cleaned_scaled_w_age$prognostic_cat)
+```
+
+plot survival curve
+KM Survival curve + log rank test
+```{r}
+plot_km_curve(gse_cleaned_scaled_w_age, "KM Curve for 43-Gene + Clinical PRS (GSE96058)")
+
+km_fit <- survfit(Surv(survival_time_years, censored_status_opp) ~ prognostic_cat, data=gse_cleaned_scaled_w_age)
+summary(km_fit, times = c(1,30,60,90*(1:10)))
+
+surv_plot <- ggsurvplot(
+  km_fit,
+  data = gse_cleaned_scaled_w_age,
+  pval = TRUE
+)
+
+# Extract the ggplot object and add the legend guide
+surv_plot$plot <- surv_plot$plot + guides(colour = guide_legend(nrow = 1))
+
+# Print the updated plot
+print(surv_plot)
+```
+
+## C-INDEX with CI ##
+```{r}
+library(survcomp)
+# Compute C-index with CI
+cindex_result <- concordance.index(
+  x = gse_cleaned_scaled_w_age$polygenic, 
+  surv.time = gse_cleaned_scaled_w_age$survival_time_years, 
+  surv.event = gse_cleaned_scaled_w_age$censored_status_opp,
+  method = "noether"
+)
+
+# Output
+cindex_result$c.index        # C-index
+cindex_result$lower          # Lower 95% CI
+cindex_result$upper          # Upper 95% CI
+
+# Output (3dp)
+round(cindex_result$c.index,3)      # C-index
+round(cindex_result$lower,3)        # Lower 95% CI
+round(cindex_result$upper,3)        # Upper 95% CI
+```
+
+######### calibration plots #########
+GSE96058 with clin, 3 year survival
+```{r}
+library(pec)
+calPlot(train_model_43_clin, time=3, data=gse_cleaned_scaled_w_age,bars=T,legend=F,showFrequencies=T,type="survival")
+```
+
+GSE96058 with clin, 5 year survival
+```{r}
+calPlot(train_model_43_clin, time=5, data=gse_cleaned_scaled_w_age,bars=T,legend=F,showFrequencies=T,type="survival")
+```
+
+#######################
+AUC(t) at 5 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_5_gse_clin = timeROC(T=gse_cleaned_scaled_w_age$survival_time_years, delta=gse_cleaned_scaled_w_age$censored_status_opp, marker=gse_cleaned_scaled_w_age$polygenic, cause=1,
+weighting = "marginal", times=c(0,5), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_5_gse_clin$AUC[2]
+auc_ci <- confint(auct_5_gse_clin, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+########################
+
+plot ROC 5-year
+```{r}
+plot(auct_5_gse_clin,time=5)
+```
+
+#######################
+AUC(t) at 3 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_3_gse_clin = timeROC(T=gse_cleaned_scaled_w_age$survival_time_years, delta=gse_cleaned_scaled_w_age$censored_status_opp, marker=gse_cleaned_scaled_w_age$polygenic, cause=1,
+weighting = "marginal", times=c(0,3), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_3_gse_clin$AUC[2]
+auc_ci <- confint(auct_3_gse_clin, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+plot ROC 3-year
+```{r}
+plot(auct_3_gse_clin,time=3)
+```
+
+#### ABLATION STUDIES ####
+
+## ABLATION STUDY 1 ##
+##### WITHOUT ML
+##### COMPARISON: construct PRS without machine learning #####
+
+after univariate analysis, filter by p <0.05
+```{r}
+df_output_p_0.05 = df_output_cox_rank[which(df_output_cox_rank$coxadjustedpvalue < 0.05),]
+```
+
+create another brca_train_cleaned_0.05 dataset that contains the genes which are adjusted p value < 0.05
+```{r}
+brca_train_cleaned_0.05_scaled = dplyr::select(brca_train_cleaned_scaled, c(1:2, df_output_p_0.05$gene)) ## select variables and the <0.05 genes
+```
+
+Multivariate Cox regression
+```{r}
+library(survival)
+set.seed(1)
+multi_cox <- coxph(Surv(survival_time_years, censored_status_opp) ~ .,data = brca_train_cleaned_0.05_scaled)
+summary(multi_cox)
+```
+
+save the multivariate cox hazard ratio
+```{r}
+library(broom)
+out = tidy(multi_cox)
+```
+
+filter to get ENSEMBLE IDS without version number
+```{r}
+out$genename = substr(out$term, 1, 15) ## extract first 15 characters
+```
+
+get gene names from Ensembl ID
+```{r}
+library(org.Hs.eg.db)
+keytypes(org.Hs.eg.db)
+columns(org.Hs.eg.db)
+
+out$genesymbol = mapIds(org.Hs.eg.db,
+       keys = out$genename,
+       keytype = 'ENSEMBL',
+       column = 'SYMBOL')
+```
+
+sort based on p value
+```{r}
+out2 <- out[order(out$p.value),]
+```
+
+## stepwise selection on validation set
+plot curve of the auc(t) in the validation set to select best out of 69 genes
+add one by one based on p value
+```{r}
+library(timeROC)
+library(survival)
+## set seed
+set.seed(1)
+## initialise the output dataframe
+stepwise_output <-as.data.frame(matrix(nrow=69,ncol=3))
+## add column names for output dataframe
+colnames(stepwise_output) = c("number of ranked genes","auct3train","auct5train")
+
+for (f in 1:69){
+  h = f+2
+  out_stepwise = out2[1:f,]
+  brca_validation_stepwise_genes = dplyr::select(brca_validation_cleaned_scaled, c(1:2, out_stepwise$term))
+  # calculate polygenic risk score for the stepwise selected genes
+  brca_validation_stepwise_genes$polygenic = c()
+  for (j in 1:103){
+    polygenic_score = 0
+    for (i in 3:h){ ## columns 3 to f+2 are the f genes we are interested in
+      c = i-2
+      polygenic_score = polygenic_score + brca_validation_stepwise_genes[j,i]*out_stepwise$estimate[c]
+      }
+    brca_validation_stepwise_genes$polygenic[j] = polygenic_score
+    }
+  ## calculate the AUC(t) train at 3 years
+  auct_3_train_random = timeROC(T=brca_validation_stepwise_genes$survival_time_years,
+                                delta=brca_validation_stepwise_genes$censored_status_opp,marker=brca_validation_stepwise_genes$polygenic,
+                                cause=1,weighting = "cox", times=c(0,3), ROC = TRUE, iid = FALSE)
+  ## save AUC(t) 3 train value in dataframe
+  stepwise_output[f,1] = f
+  stepwise_output[f,2] = auct_3_train_random$AUC[2]
+  ## calculate the AUC(t) train at 5 years
+  auct_5_train_random = timeROC(T=brca_validation_stepwise_genes$survival_time_years,
+                                delta=brca_validation_stepwise_genes$censored_status_opp,marker=brca_validation_stepwise_genes$polygenic,
+                                cause=1,weighting = "cox", times=c(0,5), ROC = TRUE, iid = FALSE)
+  ## save AUC(t) 5 train value in dataframe
+  stepwise_output[f,3] = auct_5_train_random$AUC[2]
+}
+
+### save the stepwise_output
+write.csv(stepwise_output,"stepwise_output_without_ML.csv")
+```
+
+plot for 5 year auct
+```{r}
+plot(stepwise_output$`number of ranked genes`,stepwise_output$auct5train,main="Plot of 5-year AUC(t) against ranked genes",ylab="AUC(t)",xlab="Number of genes",pch=16)
+abline(v=31,col="blue")
+```
+
+filter to get top 31 genes
+```{r}
+out3_withoutML = out2[1:31,]
+```
+
+```{r}
+brca_train_31_genes_scaled = dplyr::select(brca_train_cleaned_scaled, c(1:2, out3_withoutML$term))
+```
+
+```{r}
+write.csv(brca_train_31_genes_scaled, "brca_train_31_genes_scaled.csv")
+```
+
+save multivariate cox hazard output
+```{r}
+write.csv(out2,"out2_withoutML.csv")
+write.csv(out,"out_withoutML.csv")
+write.csv(out3_withoutML, "out3_withoutML.csv")
+```
+
+# PRS for the 31 selected genes
+```{r}
+brca_train_31_genes_scaled$polygenic = c()
+for (j in 1:722){
+  polygenic_score = 0
+  for (i in 3:33){ ## columns 3 to 33 are the 31 genes we are interested in
+    c = i-2
+    polygenic_score = polygenic_score + brca_train_31_genes_scaled[j,i]*out3_withoutML$estimate[c] ##calculate PRS by multiplying gene expression with multivariate coefficient and summing up for all 31 genes
+  }
+  brca_train_31_genes_scaled$polygenic[j] = polygenic_score
+}
+```
+
+histogram of PRS
+```{r}
+hist(brca_train_31_genes_scaled$polygenic,main="Distribution of polygenic risk score scaled in training set (31 genes)",xlab="Polygenic risk score")
+```
+
+cutpoint
+```{r}
+median(brca_train_31_genes_scaled$polygenic)
+```
+
+Categorize cases into high risk or low risk groups based on polygenic score
+cutpoint is 0.0347
+```{r}
+brca_train_31_genes_scaled$prognostic_cat <- ifelse(brca_train_31_genes_scaled$polygenic >= 0.0347, "High PRS" ,"Low PRS") ## high is 1, low is 0
+```
+
+```{r}
+table(brca_train_31_genes_scaled$prognostic_cat)
+```
+
+histogram of PRS
+```{r}
+hist(brca_train_31_genes_scaled$polygenic,main="Distribution of polygenic risk score in training set scaled (31 genes)",xlab="Polygenic risk score")
+abline(v=0.0347, col="blue")
+```
+
+KM Survival curve + log rank test
+censored_status_opp variable (0 is alive, 1 is dead)
+```{r}
+plot_km_curve(brca_train_31_genes_scaled, "KM Curve for 31-Gene PRS (Training Set)")
+
+km_fit <- survfit(Surv(survival_time_years, censored_status_opp) ~ prognostic_cat, data=brca_train_31_genes_scaled)
+summary(km_fit, times = c(1,30,60,90*(1:10)))
+
+surv_plot <- ggsurvplot(
+  km_fit,
+  data = brca_train_31_genes_scaled,
+  pval = TRUE
+)
+
+# Extract the ggplot object and add the legend guide
+surv_plot$plot <- surv_plot$plot + guides(colour = guide_legend(nrow = 1))
+
+# Print the updated plot
+print(surv_plot)
+```
+
+## C-INDEX with CI ##
+```{r}
+library(survcomp)
+
+# Compute C-index with CI
+cindex_result <- concordance.index(
+  x = brca_train_31_genes_scaled$polygenic, 
+  surv.time = brca_train_31_genes_scaled$survival_time_years, 
+  surv.event = brca_train_31_genes_scaled$censored_status_opp,
+  method = "noether"
+)
+
+# Output
+cindex_result$c.index        # C-index
+cindex_result$lower          # Lower 95% CI
+cindex_result$upper          # Upper 95% CI
+
+# Output (3dp)
+round(cindex_result$c.index,3)      # C-index
+round(cindex_result$lower,3)        # Lower 95% CI
+round(cindex_result$upper,3)        # Upper 95% CI
+```
+
+#######################
+AUC(t) at 5 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_5_train_31 = timeROC(T=brca_train_31_genes_scaled$survival_time_years, delta=brca_train_31_genes_scaled$censored_status_opp, marker=brca_train_31_genes_scaled$polygenic, cause=1,
+weighting = "marginal", times=c(0,5), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_5_train_31$AUC[2]
+auc_ci <- confint(auct_5_train_31, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+
+plot ROC curve at 5 years
+```{r}
+plot(auct_5_train_31,time=5)
+```
+
+#######################
+AUC(t) at 3 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_3_train_31 = timeROC(T=brca_train_31_genes_scaled$survival_time_years, delta=brca_train_31_genes_scaled$censored_status_opp, marker=brca_train_31_genes_scaled$polygenic, cause=1,
+weighting = "marginal", times=c(0,3), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_3_train_31$AUC[2]
+auc_ci <- confint(auct_3_train_31, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+
+plot ROC curve at 3 years
+```{r}
+plot(auct_3_train_31,time=3)
+```
+
+## validate on 20% test set ##
+select the 31 genes from 20% test set
+```{r}
+brca_test_31_genes_scaled = dplyr::select(brca_test_cleaned_scaled, c(1:2, out3_withoutML$term)) ## select outcomes and the 31 genes
+```
+
+```{r}
+write.csv(brca_test_31_genes_scaled,"brca_test_31_genes_scaled.csv")
+```
+
+# calculate PRS for the 31 selected genes
+```{r}
+brca_test_31_genes_scaled$polygenic = c()
+for (j in 1:206){
+  polygenic_score = 0
+  for (i in 3:33){ ## columns 3 to 33 are the 31 genes we are interested in
+    c = i-2
+    polygenic_score = polygenic_score + brca_test_31_genes_scaled[j,i]*out3_withoutML$estimate[c] ##calculate polygenic risk score by multiplying gene expression with multi cox coefficient and summing up for all 31 genes
+  }
+  brca_test_31_genes_scaled$polygenic[j] = polygenic_score ## add polygenic score of that person to the column
+}
+```
+
+histogram of PRS
+```{r}
+hist(brca_test_31_genes_scaled$polygenic,main="Distribution of polygenic risk score for test set scaled (31 genes)",xlab="Polygenic risk score")
+abline(v=0.0347, col="blue")
+```
+
+Categorize cases into high risk or low risk groups based on polygenic score
+```{r}
+brca_test_31_genes_scaled$prognostic_cat <- ifelse(brca_test_31_genes_scaled$polygenic >= 0.0347, "High PRS" ,"Low PRS") ## high is 1, low is 0
+```
+
+```{r}
+table(brca_test_31_genes_scaled$prognostic_cat)
+```
+
+KM Survival curve + log rank test
+```{r}
+plot_km_curve(brca_test_31_genes_scaled, "KM Curve for 31-Gene PRS (Test Set)")
+
+km_fit <- survfit(Surv(survival_time_years, censored_status_opp) ~ prognostic_cat, data=brca_test_31_genes_scaled)
+summary(km_fit, times = c(1,30,60,90*(1:10)))
+
+surv_plot <- ggsurvplot(
+  km_fit,
+  data = brca_test_31_genes_scaled,
+  pval = TRUE
+)
+
+# Extract the ggplot object and add the legend guide
+surv_plot$plot <- surv_plot$plot + guides(colour = guide_legend(nrow = 1))
+
+# Print the updated plot
+print(surv_plot)
+```
+
+## C-INDEX with CI ##
+```{r}
+library(survcomp)
+
+# Compute C-index with CI
+cindex_result <- concordance.index(
+  x = brca_test_31_genes_scaled$polygenic, 
+  surv.time = brca_test_31_genes_scaled$survival_time_years, 
+  surv.event = brca_test_31_genes_scaled$censored_status_opp,
+  method = "noether"
+)
+
+# Output
+cindex_result$c.index        # C-index
+cindex_result$lower          # Lower 95% CI
+cindex_result$upper          # Upper 95% CI
+
+# Output (3dp)
+round(cindex_result$c.index,3)      # C-index
+round(cindex_result$lower,3)        # Lower 95% CI
+round(cindex_result$upper,3)        # Upper 95% CI
+```
+
+#######################
+AUC(t) at 5 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_5_test_31 = timeROC(T=brca_test_31_genes_scaled$survival_time_years, delta=brca_test_31_genes_scaled$censored_status_opp, marker=brca_test_31_genes_scaled$polygenic, cause=1,
+weighting = "marginal", times=c(0,5), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_5_test_31$AUC[2]
+auc_ci <- confint(auct_5_test_31, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+
+plot roc curve at 5 year
+```{r}
+plot(auct_5_test_31,time=5)
+```
+
+#######################
+AUC(t) at 3 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_3_test_31 = timeROC(T=brca_test_31_genes_scaled$survival_time_years, delta=brca_test_31_genes_scaled$censored_status_opp, marker=brca_test_31_genes_scaled$polygenic, cause=1,
+weighting = "marginal", times=c(0,3), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_3_test_31$AUC[2]
+auc_ci <- confint(auct_3_test_31, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+
+plot roc curve at 3 year
+```{r}
+plot(auct_3_test_31,time=3)
+```
+
+## ABLATION STUDY 2 ##
+#### random survival forest
+rank via random survival forest using randomForestSRC package
+```{r}
+library(randomForestSRC)
+## create the object
+o <- rfsrc(Surv(survival_time_years,censored_status_opp)~., brca_train_107_genes_scaled,
+             ntree = 1000, nodesize = 5, nsplit = 50, importance = TRUE)
+## using the vimp function
+vimpresults <- vimp(o, importance = TRUE)
+vimprank <- data.frame(vimpresults$importance)
+rfsurvival_ranked = data.frame(cbind(row.names(vimprank),vimprank$vimpresults.importance))
+colnames(rfsurvival_ranked) = c("genes","rankscore")
+```
+
+reorder based on random survival forest rank
+```{r}
+rfsurvival_ranked_ordered = arrange(rfsurvival_ranked, desc(rankscore))
+```
+
+save as csv
+```{r}
+write.csv(rfsurvival_ranked_ordered,"rfsurvival_ranked_ordered.csv")
+```
+
+Multivariate Cox regression
+```{r}
+library(survival)
+set.seed(1)
+multi_cox <- coxph(Surv(survival_time_years, censored_status_opp) ~ .,data = brca_train_107_genes_scaled)
+summary(multi_cox)
+```
+
+save the multivariate cox results
+```{r}
+library(broom)
+out = tidy(multi_cox)
+```
+
+filter to get ENSEMBLE IDS without version number
+```{r}
+out$genename = substr(out$term, 1, 15) ## extract first 15 characters
+```
+
+get gene names from ensembl gene id
+```{r}
+library(org.Hs.eg.db)
+keytypes(org.Hs.eg.db)
+columns(org.Hs.eg.db)
+
+out$genesymbol = mapIds(org.Hs.eg.db,
+       keys = out$genename,
+       keytype = 'ENSEMBL',
+       column = 'SYMBOL')
+```
+
+sort based on random survival forest
+```{r}
+out_rfsurvival <- out[match(rfsurvival_ranked_ordered$genes, out$term), ]
+write.csv(out_rfsurvival,"out_rfsurvival.csv")
+```
+
+## stepwise selection on validation set
+plot curve of auc(t) in validation set to select best out of 107 genes
+add genes one by one based on rsf rank
+```{r}
+library(timeROC)
+library(survival)
+## set seed
+set.seed(1)
+## initialise the output dataframe
+stepwise_output_rsf <-as.data.frame(matrix(nrow=107,ncol=3))
+## add column names for output dataframe
+colnames(stepwise_output_rsf) = c("number of ranked genes","auct3train","auct5train")
+
+### start for loop ###
+for (f in 1:107){
+  h = f+2
+  out_stepwise = out_rfsurvival[1:f,]
+  brca_validation_stepwise_genes = dplyr::select(brca_validation_cleaned_scaled, c(1:2, out_stepwise$term))
+  # calculate polygenic risk score for the stepwise selected genes
+  brca_validation_stepwise_genes$polygenic = c()
+  for (j in 1:103){
+    polygenic_score = 0
+    for (i in 3:h){ ## columns 3 to f+2 are the f genes we are interested in
+      c = i-2
+      polygenic_score = polygenic_score + brca_validation_stepwise_genes[j,i]*out_stepwise$estimate[c]
+      }
+    brca_validation_stepwise_genes$polygenic[j] = polygenic_score
+    }
+  ## calculate the AUC(t) train at 3 years
+  auct_3_train_random = timeROC(T=brca_validation_stepwise_genes$survival_time_years,
+                                delta=brca_validation_stepwise_genes$censored_status_opp,marker=brca_validation_stepwise_genes$polygenic,
+                                cause=1,weighting = "cox", times=c(0,3), ROC = TRUE, iid = FALSE)
+  ## save AUC(t) 3 train value in dataframe
+  stepwise_output_rsf[f,1] = f
+  stepwise_output_rsf[f,2] = auct_3_train_random$AUC[2]
+  ## calculate the AUC(t) train at 5 years
+  auct_5_train_random = timeROC(T=brca_validation_stepwise_genes$survival_time_years,
+                                delta=brca_validation_stepwise_genes$censored_status_opp,marker=brca_validation_stepwise_genes$polygenic,
+                                cause=1,weighting = "cox", times=c(0,5), ROC = TRUE, iid = FALSE)
+  ## save AUC(t) 5 train value in dataframe
+  stepwise_output_rsf[f,3] = auct_5_train_random$AUC[2]
+}
+### end of for loop ###
+
+### save the stepwise_output_rsf
+write.csv(stepwise_output_rsf,"stepwise_output_rsf.csv")
+```
+
+plot for 5 year auct
+```{r}
+plot(stepwise_output_rsf$`number of ranked genes`,stepwise_output_rsf$auct5train,main="Plot of 5-year AUC(t) against ranked genes (RSF)",ylab="AUC(t)",xlab="Number of genes",pch=16)
+abline(v=26,col="blue")
+```
+
+filter to get top 26 genes
+```{r}
+out_26 = out_rfsurvival[1:26,]
+```
+
+select the 26 genes
+```{r}
+brca_train_26_genes_scaled = dplyr::select(brca_train_cleaned_scaled, c(1:2, out_26$term))
+```
+
+```{r}
+write.csv(brca_train_26_genes_scaled, "brca_train_26_genes_scaled.csv")
+write.csv(out_26, "out_26.csv")
+```
+
+# PRS for the 26 selected genes
+```{r}
+brca_train_26_genes_scaled$polygenic = c()
+for (j in 1:722){
+  polygenic_score = 0
+  for (i in 3:28){ ## columns 3 to 28 are the 26 genes we are interested in
+    c = i-2
+    polygenic_score = polygenic_score + brca_train_26_genes_scaled[j,i]*out_26$estimate[c]
+  }
+  brca_train_26_genes_scaled$polygenic[j] = polygenic_score
+}
+```
+
+histogram of PRS
+```{r}
+hist(brca_train_26_genes_scaled$polygenic,main="Distribution of polygenic risk score scaled in training set (26 genes)",xlab="Polygenic risk score")
+```
+
+cutpoint
+```{r}
+median(brca_train_26_genes_scaled$polygenic)
+```
+
+Categorize cases into high risk or low risk groups based on polygenic score
+cutpoint is -0.211
+```{r}
+brca_train_26_genes_scaled$prognostic_cat <- ifelse(brca_train_26_genes_scaled$polygenic >= -0.211, "High PRS" ,"Low PRS") ## high is 1, low is 0
+```
+
+```{r}
+table(brca_train_26_genes_scaled$prognostic_cat)
+```
+
+histogram of PRS
+```{r}
+hist(brca_train_26_genes_scaled$polygenic,main="Distribution of polygenic risk score in training set scaled (26 genes)",xlab="Polygenic risk score")
+abline(v=-0.211, col="blue")
+```
+
+KM Survival curve + log rank test
+censored_status_opp variable (0 is alive, 1 is dead)
+```{r}
+plot_km_curve(brca_train_26_genes_scaled, "KM Curve for 26-Gene PRS (Training Set)")
+
+km_fit <- survfit(Surv(survival_time_years, censored_status_opp) ~ prognostic_cat, data=brca_train_26_genes_scaled)
+summary(km_fit, times = c(1,30,60,90*(1:10)))
+
+surv_plot <- ggsurvplot(
+  km_fit,
+  data = brca_train_26_genes_scaled,
+  pval = TRUE
+)
+
+# Extract the ggplot object and add the legend guide
+surv_plot$plot <- surv_plot$plot + guides(colour = guide_legend(nrow = 1))
+
+# Print the updated plot
+print(surv_plot)
+```
+
+## C-INDEX with CI ##
+```{r}
+library(survcomp)
+
+# Compute C-index with CI
+cindex_result <- concordance.index(
+  x = brca_train_26_genes_scaled$polygenic, 
+  surv.time = brca_train_26_genes_scaled$survival_time_years, 
+  surv.event = brca_train_26_genes_scaled$censored_status_opp,
+  method = "noether"
+)
+
+# Output
+cindex_result$c.index        # C-index
+cindex_result$lower          # Lower 95% CI
+cindex_result$upper          # Upper 95% CI
+
+# Output (3dp)
+round(cindex_result$c.index,3)      # C-index
+round(cindex_result$lower,3)        # Lower 95% CI
+round(cindex_result$upper,3)        # Upper 95% CI
+```
+#######################
+AUC(t) at 5 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_5_train_26 = timeROC(T=brca_train_26_genes_scaled$survival_time_years, delta=brca_train_26_genes_scaled$censored_status_opp, marker=brca_train_26_genes_scaled$polygenic, cause=1,
+weighting = "marginal", times=c(0,5), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_5_train_26$AUC[2]
+auc_ci <- confint(auct_5_train_26, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+
+plot ROC curve at 5 years
+```{r}
+plot(auct_5_train_26,time=5)
+```
+
+#######################
+AUC(t) at 3 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_3_train_26 = timeROC(T=brca_train_26_genes_scaled$survival_time_years, delta=brca_train_26_genes_scaled$censored_status_opp, marker=brca_train_26_genes_scaled$polygenic, cause=1,
+weighting = "marginal", times=c(0,3), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_3_train_26$AUC[2]
+auc_ci <- confint(auct_3_train_26, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+
+plot ROC curve at 3 years
+```{r}
+plot(auct_3_train_26,time=3)
+```
+
+## validate on 20% test set ##
+select the 26 genes from 20% test set
+```{r}
+brca_test_26_genes_scaled = dplyr::select(brca_test_cleaned_scaled, c(1:2, out_26$term))
+```
+
+```{r}
+write.csv(brca_test_26_genes_scaled,"brca_test_26_genes_scaled.csv")
+```
+
+# calculate PRS for the 26 selected genes
+```{r}
+brca_test_26_genes_scaled$polygenic = c()
+for (j in 1:206){
+  polygenic_score = 0
+  for (i in 3:28){ ## columns 3 to 33 are the 31 genes we are interested in
+    c = i-2
+    polygenic_score = polygenic_score + brca_test_26_genes_scaled[j,i]*out_26$estimate[c]
+  }
+  brca_test_26_genes_scaled$polygenic[j] = polygenic_score ## add polygenic score of that person to the column
+}
+```
+
+histogram of PRS
+```{r}
+hist(brca_test_26_genes_scaled$polygenic,main="Distribution of polygenic risk score for test set scaled (26 genes)",xlab="Polygenic risk score")
+abline(v=-0.211, col="blue")
+```
+
+Categorize cases into high risk or low risk groups based on polygenic score
+```{r}
+brca_test_26_genes_scaled$prognostic_cat <- ifelse(brca_test_26_genes_scaled$polygenic >= -0.211, "High PRS" ,"Low PRS") ## high is 1, low is 0
+```
+
+```{r}
+table(brca_test_26_genes_scaled$prognostic_cat)
+```
+
+KM Survival curve + log rank test
+```{r}
+plot_km_curve(brca_test_26_genes_scaled, "KM Curve for 26-Gene PRS (Test Set)")
+
+km_fit <- survfit(Surv(survival_time_years, censored_status_opp) ~ prognostic_cat, data=brca_test_26_genes_scaled)
+summary(km_fit, times = c(1,30,60,90*(1:10)))
+
+surv_plot <- ggsurvplot(
+  km_fit,
+  data = brca_test_26_genes_scaled,
+  pval = TRUE
+)
+
+# Extract the ggplot object and add the legend guide
+surv_plot$plot <- surv_plot$plot + guides(colour = guide_legend(nrow = 1))
+
+# Print the updated plot
+print(surv_plot)
+```
+
+## C-INDEX with CI ##
+```{r}
+library(survcomp)
+
+# Compute C-index with CI
+cindex_result <- concordance.index(
+  x = brca_test_26_genes_scaled$polygenic, 
+  surv.time = brca_test_26_genes_scaled$survival_time_years, 
+  surv.event = brca_test_26_genes_scaled$censored_status_opp,
+  method = "noether"
+)
+
+# Output
+cindex_result$c.index        # C-index
+cindex_result$lower          # Lower 95% CI
+cindex_result$upper          # Upper 95% CI
+
+# Output (3dp)
+round(cindex_result$c.index,3)      # C-index
+round(cindex_result$lower,3)        # Lower 95% CI
+round(cindex_result$upper,3)        # Upper 95% CI
+```
+
+#######################
+AUC(t) at 5 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_5_test_26 = timeROC(T=brca_test_26_genes_scaled$survival_time_years, delta=brca_test_26_genes_scaled$censored_status_opp, marker=brca_test_26_genes_scaled$polygenic, cause=1,
+weighting = "marginal", times=c(0,5), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_5_test_26$AUC[2]
+auc_ci <- confint(auct_5_test_26, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+
+plot roc curve at 5 year
+```{r}
+plot(auct_5_test_26,time=5)
+```
+
+#######################
+AUC(t) at 3 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_3_test_26 = timeROC(T=brca_test_26_genes_scaled$survival_time_years, delta=brca_test_26_genes_scaled$censored_status_opp, marker=brca_test_26_genes_scaled$polygenic, cause=1,
+weighting = "marginal", times=c(0,3), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_3_test_26$AUC[2]
+auc_ci <- confint(auct_3_test_26, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+
+plot roc curve at 3 year
+```{r}
+plot(auct_3_test_26,time=3)
+```
+#########################
+### ABLATION STUDY 3
+## WITHOUT STEPWISE SELECTION
+
+FROM THE 107 GENES...FROM LASSO COX
+Multivariate Cox regression
+```{r}
+library(survival)
+set.seed(1)
+multi_cox <- coxph(Surv(survival_time_years, censored_status_opp) ~ .,data = brca_train_107_genes_scaled)
+summary(multi_cox)
+```
+
+save the multivariate cox results
+```{r}
+library(broom)
+out = tidy(multi_cox)
+```
+
+filter to get ENSEMBLE IDS without version number
+```{r}
+out$genename = substr(out$term, 1, 15) ## extract first 15 characters
+write.csv(out, "out.csv")
+```
+
+get gene names from ensembl gene id
+```{r}
+library(org.Hs.eg.db)
+keytypes(org.Hs.eg.db)
+columns(org.Hs.eg.db)
+
+out$genesymbol = mapIds(org.Hs.eg.db,
+       keys = out$genename,
+       keytype = 'ENSEMBL',
+       column = 'SYMBOL')
+```
+
+# PRS for the 107 selected genes
+```{r}
+brca_train_107_genes_scaled$polygenic = c()
+for (j in 1:722){
+  polygenic_score = 0
+  for (i in 3:109){ ## columns 3 to 109 are the 107 genes we are interested in
+    c = i-2
+    polygenic_score = polygenic_score + brca_train_107_genes_scaled[j,i]*out$estimate[c]
+  }
+  brca_train_107_genes_scaled$polygenic[j] = polygenic_score
+}
+```
+
+histogram of PRS
+```{r}
+hist(brca_train_107_genes_scaled$polygenic,main="Distribution of polygenic risk score scaled in training set (107 genes)",xlab="Polygenic risk score")
+```
+
+cutpoint
+```{r}
+median(brca_train_107_genes_scaled$polygenic)
+```
+
+Categorize cases into high risk or low risk groups based on polygenic score
+cutpoint is 0.541
+```{r}
+brca_train_107_genes_scaled$prognostic_cat <- ifelse(brca_train_107_genes_scaled$polygenic >= 0.541, "High PRS" ,"Low PRS") ## high is 1, low is 0
+```
+
+```{r}
+table(brca_train_107_genes_scaled$prognostic_cat)
+```
+
+histogram of PRS
+```{r}
+hist(brca_train_107_genes_scaled$polygenic,main="Distribution of polygenic risk score in training set scaled (107 genes)",xlab="Polygenic risk score")
+abline(v=0.541, col="blue")
+```
+
+KM Survival curve + log rank test
+censored_status_opp variable (0 is alive, 1 is dead)
+```{r}
+plot_km_curve(brca_train_107_genes_scaled, "KM Curve for 107-Gene PRS (Training Set)")
+
+km_fit <- survfit(Surv(survival_time_years, censored_status_opp) ~ prognostic_cat, data=brca_train_107_genes_scaled)
+summary(km_fit, times = c(1,30,60,90*(1:10)))
+
+surv_plot <- ggsurvplot(
+  km_fit,
+  data = brca_train_107_genes_scaled,
+  pval = TRUE
+)
+
+# Extract the ggplot object and add the legend guide
+surv_plot$plot <- surv_plot$plot + guides(colour = guide_legend(nrow = 1))
+
+# Print the updated plot
+print(surv_plot)
+```
+
+## C-INDEX with CI ##
+```{r}
+library(survcomp)
+
+# Compute C-index with CI
+cindex_result <- concordance.index(
+  x = brca_train_107_genes_scaled$polygenic, 
+  surv.time = brca_train_107_genes_scaled$survival_time_years, 
+  surv.event = brca_train_107_genes_scaled$censored_status_opp,
+  method = "noether"
+)
+
+# Output
+cindex_result$c.index        # C-index
+cindex_result$lower          # Lower 95% CI
+cindex_result$upper          # Upper 95% CI
+
+# Output (3dp)
+round(cindex_result$c.index,3)      # C-index
+round(cindex_result$lower,3)        # Lower 95% CI
+round(cindex_result$upper,3)        # Upper 95% CI
+```
+
+#######################
+AUC(t) at 5 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_5_train_107 = timeROC(T=brca_train_107_genes_scaled$survival_time_years, delta=brca_train_107_genes_scaled$censored_status_opp, marker=brca_train_107_genes_scaled$polygenic, cause=1,
+weighting = "marginal", times=c(0,5), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_5_train_107$AUC[2]
+auc_ci <- confint(auct_5_train_107, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+
+plot ROC curve at 5 years
+```{r}
+plot(auct_5_train_107,time=5)
+```
+
+#######################
+AUC(t) at 3 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_3_train_107 = timeROC(T=brca_train_107_genes_scaled$survival_time_years, delta=brca_train_107_genes_scaled$censored_status_opp, marker=brca_train_107_genes_scaled$polygenic, cause=1,
+weighting = "marginal", times=c(0,3), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_3_train_107$AUC[2]
+auc_ci <- confint(auct_3_train_107, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+
+plot ROC curve at 3 years
+```{r}
+plot(auct_3_train_107,time=3)
+```
+
+## validate on 20% test set ##
+select the 107 genes from 20% test set
+```{r}
+brca_test_107_genes_scaled = dplyr::select(brca_test_cleaned_scaled, c(1:2, out$term))
+```
+
+```{r}
+write.csv(brca_test_107_genes_scaled,"brca_test_107_genes_scaled.csv")
+```
+
+# calculate PRS for the 107 selected genes
+```{r}
+brca_test_107_genes_scaled$polygenic = c()
+for (j in 1:206){
+  polygenic_score = 0
+  for (i in 3:109){
+    c = i-2
+    polygenic_score = polygenic_score + brca_test_107_genes_scaled[j,i]*out$estimate[c]
+  }
+  brca_test_107_genes_scaled$polygenic[j] = polygenic_score
+}
+```
+
+histogram of PRS
+```{r}
+hist(brca_test_107_genes_scaled$polygenic,main="Distribution of polygenic risk score for test set scaled (107 genes)",xlab="Polygenic risk score")
+abline(v=0.541, col="blue")
+```
+
+Categorize cases into high risk or low risk groups based on polygenic score
+```{r}
+brca_test_107_genes_scaled$prognostic_cat <- ifelse(brca_test_107_genes_scaled$polygenic >= 0.541, "High PRS" ,"Low PRS") ## high is 1, low is 0
+```
+
+```{r}
+table(brca_test_107_genes_scaled$prognostic_cat)
+```
+
+KM Survival curve + log rank test
+```{r}
+plot_km_curve(brca_test_107_genes_scaled, "KM Curve for 107-Gene PRS (Test Set)")
+
+km_fit <- survfit(Surv(survival_time_years, censored_status_opp) ~ prognostic_cat, data=brca_test_107_genes_scaled)
+summary(km_fit, times = c(1,30,60,90*(1:10)))
+
+surv_plot <- ggsurvplot(
+  km_fit,
+  data = brca_test_107_genes_scaled,
+  pval = TRUE
+)
+
+# Extract the ggplot object and add the legend guide
+surv_plot$plot <- surv_plot$plot + guides(colour = guide_legend(nrow = 1))
+
+# Print the updated plot
+print(surv_plot)
+```
+
+## C-INDEX with CI ##
+```{r}
+library(survcomp)
+
+# Compute C-index with CI
+cindex_result <- concordance.index(
+  x = brca_test_107_genes_scaled$polygenic, 
+  surv.time = brca_test_107_genes_scaled$survival_time_years, 
+  surv.event = brca_test_107_genes_scaled$censored_status_opp,
+  method = "noether"
+)
+
+# Output
+cindex_result$c.index        # C-index
+cindex_result$lower          # Lower 95% CI
+cindex_result$upper          # Upper 95% CI
+
+# Output (3dp)
+round(cindex_result$c.index,3)      # C-index
+round(cindex_result$lower,3)        # Lower 95% CI
+round(cindex_result$upper,3)        # Upper 95% CI
+```
+
+AUC(t) at 5 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_5_test_107 = timeROC(T=brca_test_107_genes_scaled$survival_time_years, delta=brca_test_107_genes_scaled$censored_status_opp, marker=brca_test_107_genes_scaled$polygenic, cause=1,
+weighting = "marginal", times=c(0,5), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_5_test_107$AUC[2]
+auc_ci <- confint(auct_5_test_107, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+
+plot roc curve at 5 year
+```{r}
+plot(auct_5_test_107,time=5)
+```
+
+#######################
+AUC(t) at 3 years with CI
+#######################
+```{r}
+set.seed(1)
+auct_3_test_107 = timeROC(T=brca_test_107_genes_scaled$survival_time_years, delta=brca_test_107_genes_scaled$censored_status_opp, marker=brca_test_107_genes_scaled$polygenic, cause=1,
+weighting = "marginal", times=c(0,3), ROC = TRUE, iid = TRUE)
+
+# Show AUC and CI
+auc_value <- auct_3_test_107$AUC[2]
+auc_ci <- confint(auct_3_test_107, parm = NULL, nsim = 1000, level = 0.95)
+
+# Print
+round(auc_value,3)
+auc_ci[1]
+```
+
+plot roc curve at 3 year
+```{r}
+plot(auct_3_test_107,time=3)
+```
+
+save matrices
+```{r}
+write.csv(brca_train_43_genes_scaled,"matrices/brca_train_43_genes_scaled.csv")
+write.csv(brca_test_43_genes_scaled,"matrices/brca_test_43_genes_scaled.csv")
+write.csv(metabric_43_genes,"matrices/metabric_43_genes.csv")
+write.csv(GSE96058_cleaned_scaled,"matrices/GSE96058_cleaned_scaled.csv")
+```
+
+save prs
+```{r}
+write.csv(out_gene_clinical,"prs/prs_coefficients_43_genes_age.csv")
+write.csv(out3,"prs/prs_coefficients_43_genes.csv")
+```
+
+```{r}
+sessionInfo()
+```
+
+
+
